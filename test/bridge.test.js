@@ -77,7 +77,11 @@ class FakeSession {
         const calls = this.parallelToolCalls
           ? [
               { requestId: "request_1", toolCallId: "call_1", arguments: { cmd: "pwd" } },
-              { requestId: "request_2", toolCallId: "call_2", arguments: { path: "README.md" } },
+              {
+                requestId: "request_2",
+                toolCallId: "call_2",
+                arguments: { input: "*** Begin Patch\n*** End Patch" },
+              },
             ]
           : [{ requestId: "request_1", toolCallId: "call_1", arguments: { cmd: "pwd" } }];
         calls.forEach((call, index) => {
@@ -257,21 +261,23 @@ test("emits Copilot multi-call batches when parallel_tool_calls is false", async
     parallel_tool_calls: false,
     tools: [
       { type: "function", name: "shell", parameters: { type: "object" } },
-      { type: "function", name: "read_file", parameters: { type: "object" } },
+      { type: "custom", name: "apply_patch", description: "Apply a patch" },
     ],
   }, response);
   await new Promise((resolve) => setTimeout(resolve, 40));
   const events = sseEvents(response);
   const calls = events
-    .filter((event) => event.type === "response.output_item.done" && event.item.type === "function_call")
+    .filter((event) => event.type === "response.output_item.done"
+      && ["function_call", "custom_tool_call"].includes(event.item.type))
     .map((event) => event.item);
-  assert.deepEqual(calls.map(({ name, call_id: callId }) => ({ name, callId })), [
-    { name: "shell", callId: "call_1" },
-    { name: "read_file", callId: "call_2" },
+  assert.deepEqual(calls.map(({ type, name, call_id: callId }) => ({ type, name, callId })), [
+    { type: "function_call", name: "shell", callId: "call_1" },
+    { type: "custom_tool_call", name: "apply_patch", callId: "call_2" },
   ]);
   assert.match(calls[0].id, /^fc_/);
-  assert.match(calls[1].id, /^fc_/);
+  assert.match(calls[1].id, /^ctc_/);
   assert.notEqual(calls[0].id, calls[1].id);
+  assert.equal(events.some((event) => event.type === "response.failed"), false);
   assert.equal(events.at(-1).type, "response.completed");
   assert.equal(events.at(-1).response.status, "completed");
 });
