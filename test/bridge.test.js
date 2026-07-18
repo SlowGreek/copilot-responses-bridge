@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { COPILOT_CLI_PATH, CopilotResponsesBridge } from "../src/bridge.js";
@@ -45,7 +46,8 @@ class FakeSession {
     };
   }
   on(type, handler) { this.events.on(type, handler); }
-  async send() {
+  async send(message) {
+    this.sent = message;
     if (this.config.availableTools.includes("builtin:web_search")) {
       queueMicrotask(() => {
         this.events.emit("assistant.server_tool_progress", {
@@ -195,6 +197,37 @@ test("streams a Codex-readable text response", async () => {
   assert.equal(lifecycle[5].item.id, itemId);
   assert.equal(lifecycle[5].item.phase, "final_answer");
   assert.equal(events.at(-1).response.status, "completed");
+});
+
+test("sends expanded pasted text to Copilot while preserving image attachments", async () => {
+  const directory = await mkdtemp(path.join(await realpath(tmpdir()), "copilot-paste-bridge-test-"));
+  try {
+    const pasted = path.join(directory, "pasted-text.txt");
+    await writeFile(pasted, "bridge-visible paste");
+    const client = new FakeClient();
+    const bridge = newBridge(client);
+    await bridge.handle({
+      ...baseRequest,
+      input: [{
+        type: "message",
+        role: "user",
+        content: [
+          { type: "input_text", text: `Use ${pasted}` },
+          { type: "input_image", image_url: "data:image/png;base64,YWJj" },
+        ],
+      }],
+    }, new FakeResponse());
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.match(client.session.sent.prompt, /bridge-visible paste/);
+    assert.match(client.session.sent.prompt, /BEGIN PASTED TEXT: pasted-text\.txt/);
+    assert.deepEqual(client.session.sent.attachments, [{
+      type: "blob",
+      mimeType: "image/png",
+      data: "YWJj",
+    }]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("finalizes commentary before keeping tool execution in the Codex harness", async () => {

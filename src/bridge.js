@@ -464,7 +464,8 @@ export class CopilotResponsesBridge {
       return;
     }
 
-    const message = newestUserMessage(request.input);
+    const message = await newestUserMessage(request.input);
+    if (turn.closed) return;
     await conversation.session.send({
       prompt: message.prompt || "Continue.",
       attachments: message.attachments,
