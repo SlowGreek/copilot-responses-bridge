@@ -18,6 +18,7 @@ export function normalizeTools(tools = []) {
         parameters: tool.parameters ?? { type: "object", properties: {} },
         defer: "never",
         skipPermission: true,
+        overridesBuiltInTool: true,
         bridgeKind: "function",
       }];
     }
@@ -36,6 +37,7 @@ export function normalizeTools(tools = []) {
         },
         defer: "never",
         skipPermission: true,
+        overridesBuiltInTool: true,
         bridgeKind: "custom",
       }];
     }

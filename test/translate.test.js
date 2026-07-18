@@ -20,6 +20,7 @@ test("translates Responses function tools", () => {
     parameters: { type: "object", properties: { cmd: { type: "string" } } },
     defer: "never",
     skipPermission: true,
+    overridesBuiltInTool: true,
     bridgeKind: "function",
   }]);
 });
@@ -32,6 +33,7 @@ test("wraps Responses custom tools without moving execution into Copilot", () =>
     format: { type: "grammar", syntax: "lark", definition: "start: patch" },
   }]);
   assert.equal(tool.bridgeKind, "custom");
+  assert.equal(tool.overridesBuiltInTool, true);
   assert.deepEqual(tool.parameters.required, ["input"]);
 });
 

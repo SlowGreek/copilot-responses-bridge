@@ -164,7 +164,31 @@ test("keeps tool execution in the Codex harness", async () => {
   assert.match(response.data, /"type":"function_call"/);
   assert.match(response.data, /"call_id":"call_1"/);
   assert.equal(client.session.config.availableTools[0], "custom:*");
+  assert.equal(client.session.config.tools[0].overridesBuiltInTool, true);
   assert.equal(client.session.config.infiniteSessions.enabled, true);
+});
+
+test("registers colliding Codex custom and function tools as explicit overrides", async () => {
+  const client = new FakeClient();
+  const bridge = newBridge(client);
+  const response = new FakeResponse();
+  await bridge.handle({
+    ...baseRequest,
+    tools: [
+      { type: "custom", name: "apply_patch", description: "Apply a patch" },
+      { type: "function", name: "shell", parameters: { type: "object" } },
+    ],
+  }, response);
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.deepEqual(client.session.config.tools.map((tool) => ({
+    name: tool.name,
+    overridesBuiltInTool: tool.overridesBuiltInTool,
+  })), [
+    { name: "apply_patch", overridesBuiltInTool: true },
+    { name: "shell", overridesBuiltInTool: true },
+  ]);
+  assert.match(response.data, /"type":"custom_tool_call"/);
+  assert.match(response.data, /"name":"apply_patch"/);
 });
 
 test("allowlists Copilot web search and emits Responses search events with citations", async () => {

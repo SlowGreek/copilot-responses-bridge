@@ -237,6 +237,7 @@ export class CopilotResponsesBridge {
       parameters: tool.parameters,
       defer: tool.defer,
       skipPermission: tool.skipPermission,
+      overridesBuiltInTool: tool.overridesBuiltInTool,
     }));
 
     const availableTools = new ToolSet();
