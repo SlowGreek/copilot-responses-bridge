@@ -40,6 +40,7 @@ class TurnStream {
     this.id = responseId();
     this.messageId = itemId("msg");
     this.text = "";
+    this.textStarted = false;
     this.closed = false;
     this.toolCalls = [];
     this.toolFlush = null;
@@ -56,10 +57,35 @@ class TurnStream {
     if (!this.closed) this.response.write(sseEvent(type, fields));
   }
 
+  startText() {
+    if (this.textStarted) return;
+    this.textStarted = true;
+    this.send("response.output_item.added", {
+      response_id: this.id,
+      output_index: 0,
+      item: {
+        id: this.messageId,
+        type: "message",
+        status: "in_progress",
+        role: "assistant",
+        content: [],
+      },
+    });
+    this.send("response.content_part.added", {
+      response_id: this.id,
+      item_id: this.messageId,
+      output_index: 0,
+      content_index: 0,
+      part: { type: "output_text", text: "", annotations: [] },
+    });
+  }
+
   delta(text) {
     if (!text || this.closed) return;
+    this.startText();
     this.text += text;
     this.send("response.output_text.delta", {
+      response_id: this.id,
       item_id: this.messageId,
       output_index: 0,
       content_index: 0,
@@ -104,14 +130,29 @@ class TurnStream {
 
   emitText(phase) {
     if (!this.text) return;
+    this.startText();
+    const part = { type: "output_text", text: this.text, annotations: [] };
     const item = {
       id: this.messageId,
       type: "message",
+      status: "completed",
       role: "assistant",
-      content: [{ type: "output_text", text: this.text }],
+      content: [part],
       phase,
     };
-    this.send("response.output_item.done", { output_index: 0, item });
+    const indexes = {
+      response_id: this.id,
+      item_id: this.messageId,
+      output_index: 0,
+      content_index: 0,
+    };
+    this.send("response.output_text.done", { ...indexes, text: this.text });
+    this.send("response.content_part.done", { ...indexes, part });
+    this.send("response.output_item.done", {
+      response_id: this.id,
+      output_index: 0,
+      item,
+    });
     this.onReference(this.messageId);
     this.text = "";
   }

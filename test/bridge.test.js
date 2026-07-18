@@ -23,8 +23,10 @@ class FakeResponse extends EventEmitter {
 }
 
 class FakeSession {
-  constructor(config) {
+  constructor(config, { commentaryBeforeTools = false, parallelToolCalls = false } = {}) {
     this.config = config;
+    this.commentaryBeforeTools = commentaryBeforeTools;
+    this.parallelToolCalls = parallelToolCalls;
     this.events = new EventEmitter();
     this.sessionId = config.sessionId ?? randomUUID();
     this.models = [];
@@ -68,14 +70,24 @@ class FakeSession {
     }
     if (this.config.tools.length) {
       queueMicrotask(() => {
-        this.events.emit("external_tool.requested", {
-          data: {
-            requestId: "request_1",
-            sessionId: this.sessionId,
-            toolCallId: "call_1",
-            toolName: this.config.tools[0].name,
-            arguments: { cmd: "pwd" },
-          },
+        if (this.commentaryBeforeTools) {
+          this.events.emit("assistant.message_delta", { data: { deltaContent: "Checking first." } });
+          this.events.emit("assistant.message", { data: { content: "Checking first." } });
+        }
+        const calls = this.parallelToolCalls
+          ? [
+              { requestId: "request_1", toolCallId: "call_1", arguments: { cmd: "pwd" } },
+              { requestId: "request_2", toolCallId: "call_2", arguments: { path: "README.md" } },
+            ]
+          : [{ requestId: "request_1", toolCallId: "call_1", arguments: { cmd: "pwd" } }];
+        calls.forEach((call, index) => {
+          this.events.emit("external_tool.requested", {
+            data: {
+              ...call,
+              sessionId: this.sessionId,
+              toolName: this.config.tools[index]?.name ?? this.config.tools[0].name,
+            },
+          });
         });
       });
       return;
@@ -92,6 +104,9 @@ class FakeSession {
 }
 
 class FakeClient {
+  constructor(options = {}) {
+    this.options = options;
+  }
   async start() {}
   async stop() {}
   async listModels() {
@@ -108,13 +123,13 @@ class FakeClient {
     }];
   }
   async createSession(config) {
-    this.session = new FakeSession(config);
+    this.session = new FakeSession(config, this.options);
     this.created ??= [];
     this.created.push(this.session);
     return this.session;
   }
   async resumeSession(sessionId, config) {
-    this.session = new FakeSession({ ...config, sessionId });
+    this.session = new FakeSession({ ...config, sessionId }, this.options);
     this.resumed ??= [];
     this.resumed.push(this.session);
     return this.session;
@@ -123,6 +138,13 @@ class FakeClient {
 
 function newBridge(client, statePath = path.join(tmpdir(), `copilot-bridge-test-${randomUUID()}.json`)) {
   return new CopilotResponsesBridge({ client, statePath });
+}
+
+function sseEvents(response) {
+  return response.data.trim().split("\n\n").map((block) => {
+    const data = block.split("\n").find((line) => line.startsWith("data: "));
+    return JSON.parse(data.slice("data: ".length));
+  });
 }
 
 const baseRequest = {
@@ -144,14 +166,35 @@ test("streams a Codex-readable text response", async () => {
   const response = new FakeResponse();
   await bridge.handle(baseRequest, response);
   await new Promise((resolve) => setImmediate(resolve));
-  assert.match(response.data, /event: response\.created/);
-  assert.match(response.data, /event: response\.output_text\.delta/);
-  assert.match(response.data, /"phase":"final_answer"/);
-  assert.match(response.data, /event: response\.completed/);
+  const events = sseEvents(response);
+  assert.deepEqual(events.map((event) => event.type), [
+    "response.created",
+    "response.output_item.added",
+    "response.content_part.added",
+    "response.output_text.delta",
+    "response.output_text.done",
+    "response.content_part.done",
+    "response.output_item.done",
+    "response.completed",
+  ]);
+  const lifecycle = events.slice(1, 7);
+  const responseId = events[0].response.id;
+  const itemId = lifecycle[0].item.id;
+  for (const event of lifecycle) {
+    assert.equal(event.response_id, responseId);
+    assert.equal(event.output_index, 0);
+  }
+  for (const event of lifecycle.slice(1, 5)) {
+    assert.equal(event.item_id, itemId);
+    assert.equal(event.content_index, 0);
+  }
+  assert.equal(lifecycle[5].item.id, itemId);
+  assert.equal(lifecycle[5].item.phase, "final_answer");
+  assert.equal(events.at(-1).response.status, "completed");
 });
 
-test("keeps tool execution in the Codex harness", async () => {
-  const client = new FakeClient();
+test("finalizes commentary before keeping tool execution in the Codex harness", async () => {
+  const client = new FakeClient({ commentaryBeforeTools: true });
   const bridge = newBridge(client);
   const response = new FakeResponse();
   const request = {
@@ -161,8 +204,22 @@ test("keeps tool execution in the Codex harness", async () => {
   };
   await bridge.handle(request, response);
   await new Promise((resolve) => setTimeout(resolve, 40));
-  assert.match(response.data, /"type":"function_call"/);
-  assert.match(response.data, /"call_id":"call_1"/);
+  const events = sseEvents(response);
+  assert.deepEqual(events.map((event) => event.type), [
+    "response.created",
+    "response.output_item.added",
+    "response.content_part.added",
+    "response.output_text.delta",
+    "response.output_text.done",
+    "response.content_part.done",
+    "response.output_item.done",
+    "response.output_item.done",
+    "response.completed",
+  ]);
+  assert.equal(events[6].item.phase, "commentary");
+  assert.equal(events[7].item.type, "function_call");
+  assert.equal(events[7].item.call_id, "call_1");
+  assert.equal(events.at(-1).response.status, "completed");
   assert.equal(client.session.config.availableTools[0], "custom:*");
   assert.equal(client.session.config.tools[0].overridesBuiltInTool, true);
   assert.equal(client.session.config.infiniteSessions.enabled, true);
@@ -189,6 +246,34 @@ test("registers colliding Codex custom and function tools as explicit overrides"
   ]);
   assert.match(response.data, /"type":"custom_tool_call"/);
   assert.match(response.data, /"name":"apply_patch"/);
+});
+
+test("emits Copilot multi-call batches when parallel_tool_calls is false", async () => {
+  const client = new FakeClient({ parallelToolCalls: true });
+  const bridge = newBridge(client);
+  const response = new FakeResponse();
+  await bridge.handle({
+    ...baseRequest,
+    parallel_tool_calls: false,
+    tools: [
+      { type: "function", name: "shell", parameters: { type: "object" } },
+      { type: "function", name: "read_file", parameters: { type: "object" } },
+    ],
+  }, response);
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  const events = sseEvents(response);
+  const calls = events
+    .filter((event) => event.type === "response.output_item.done" && event.item.type === "function_call")
+    .map((event) => event.item);
+  assert.deepEqual(calls.map(({ name, call_id: callId }) => ({ name, callId })), [
+    { name: "shell", callId: "call_1" },
+    { name: "read_file", callId: "call_2" },
+  ]);
+  assert.match(calls[0].id, /^fc_/);
+  assert.match(calls[1].id, /^fc_/);
+  assert.notEqual(calls[0].id, calls[1].id);
+  assert.equal(events.at(-1).type, "response.completed");
+  assert.equal(events.at(-1).response.status, "completed");
 });
 
 test("allowlists Copilot web search and emits Responses search events with citations", async () => {
