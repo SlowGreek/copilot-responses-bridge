@@ -2,9 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { CopilotResponsesBridge } from "../src/bridge.js";
+import { COPILOT_CLI_PATH, CopilotResponsesBridge } from "../src/bridge.js";
 
 class FakeResponse extends EventEmitter {
   constructor() {
@@ -131,6 +132,11 @@ const baseRequest = {
   tools: [],
   stream: true,
 };
+
+test("resolves the installed Copilot CLI loader", () => {
+  assert.equal(existsSync(COPILOT_CLI_PATH), true);
+  assert.equal(path.basename(COPILOT_CLI_PATH), "npm-loader.js");
+});
 
 test("streams a Codex-readable text response", async () => {
   const client = new FakeClient();

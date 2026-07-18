@@ -1,6 +1,7 @@
-import { CopilotClient, ToolSet } from "@github/copilot-sdk";
+import { CopilotClient, RuntimeConnection, ToolSet } from "@github/copilot-sdk";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { writeCodexCatalog } from "./catalog.js";
 import { BridgeState } from "./state.js";
 import {
@@ -16,6 +17,7 @@ import {
 } from "./translate.js";
 
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
+export const COPILOT_CLI_PATH = fileURLToPath(import.meta.resolve("@github/copilot/npm-loader.js"));
 
 function selectedReasoningEffort(request) {
   return ["low", "medium", "high", "xhigh"].includes(request.reasoning?.effort)
@@ -190,6 +192,7 @@ export class CopilotResponsesBridge {
       mode: "empty",
       logLevel: "error",
       baseDirectory,
+      connection: RuntimeConnection.forStdio({ path: COPILOT_CLI_PATH }),
     });
     this.state = new BridgeState(statePath ?? path.join(baseDirectory, "bridge-state.json"));
     this.timeoutMs = timeoutMs;
