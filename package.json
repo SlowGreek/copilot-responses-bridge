@@ -1,0 +1,17 @@
+{
+  "name": "copilot-responses-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A Responses API compatibility bridge from OpenAI Codex to the supported GitHub Copilot SDK.",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@github/copilot-sdk": "1.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
