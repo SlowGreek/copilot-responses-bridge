@@ -401,7 +401,7 @@ test("returns external tool calls to OpenCode and round-trips all results", asyn
   const bridge = newBridge(client);
   const first = new FakeResponse();
   await bridge.handle(baseRequest({
-    parallel_tool_calls: false,
+    parallel_tool_calls: true,
     tools: [
       {
         type: "function",
@@ -429,11 +429,11 @@ test("returns external tool calls to OpenCode and round-trips all results", asyn
   assert.match(calls[0].call_id, /^call_/);
   assert.match(calls[1].call_id, /^call_/);
   assert.notEqual(calls[0].call_id, calls[1].call_id);
-  assert.equal(firstEvents.at(-1).response.parallel_tool_calls, false);
+  assert.equal(firstEvents.at(-1).response.parallel_tool_calls, true);
 
   const second = new FakeResponse();
   await bridge.handle(baseRequest({
-    parallel_tool_calls: false,
+    parallel_tool_calls: true,
     input: [
       { role: "user", content: [{ type: "input_text", text: "weather and time" }] },
       ...calls.map((call) => ({
@@ -475,6 +475,39 @@ test("returns external tool calls to OpenCode and round-trips all results", asyn
   assert.match(second.data, /tool complete/);
   assert.equal(client.sessions.length, 1);
   assert.equal(client.sessions[0].disconnected, true);
+});
+
+test("rejects a provider batch when parallel_tool_calls is false", async () => {
+  const client = new FakeClient([{
+    toolCalls: [
+      {
+        requestId: "request_1",
+        toolCallId: "call_1",
+        toolName: "first",
+        arguments: {},
+      },
+      {
+        requestId: "request_2",
+        toolCallId: "call_2",
+        toolName: "second",
+        arguments: {},
+      },
+    ],
+  }]);
+  const response = new FakeResponse();
+  await newBridge(client).handle(baseRequest({
+    parallel_tool_calls: false,
+    tools: [
+      { type: "function", name: "first", description: "First", parameters: { type: "object" } },
+      { type: "function", name: "second", description: "Second", parameters: { type: "object" } },
+    ],
+  }), response);
+  const events = sseEvents(response);
+  assert.equal(events.at(-1).type, "response.failed");
+  assert.equal(events.at(-1).response.error.code, "parallel_tool_calls_violation");
+  assert.equal(events.some((event) =>
+    event.type === "response.output_item.done" && event.item.type === "function_call"), false);
+  assert.equal(client.sessions[0].aborted, true);
 });
 
 test("binds tool continuations to matching history and model", async () => {

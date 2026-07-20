@@ -100,8 +100,10 @@ change while a tool is running, the bridge aborts the stale SDK session and
 returns 409. OpenCode retries the same complete history under the new config,
 which starts a fresh provider turn; removed tools cannot be requested again.
 
-`parallel_tool_calls:false` is advisory. A Copilot-emitted batch is still
-returned intact; OpenCode remains responsible for execution policy.
+`parallel_tool_calls:false` is enforced at the terminal boundary. More than one
+external/provider-hosted call fails with `parallel_tool_calls_violation` before
+any tool-call item is completed, so Copilot cannot force concurrency the host
+declined.
 
 Tool choice is enforced at the terminal boundary, not trusted as prompt
 guidance. `required` fails if neither an external nor provider-hosted tool was

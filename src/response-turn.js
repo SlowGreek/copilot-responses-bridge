@@ -441,6 +441,12 @@ export class ResponsesTurn {
   }
 
   enforceToolChoice() {
+    if (this.request.parallel_tool_calls === false && this.observedTools.length > 1) {
+      throw new BridgeRequestError("provider emitted parallel tools while parallel_tool_calls was false", {
+        statusCode: 502,
+        code: "parallel_tool_calls_violation",
+      });
+    }
     const choice = this.request.tool_choice ?? "auto";
     if (choice === "auto") return;
     if (choice === "none") {
