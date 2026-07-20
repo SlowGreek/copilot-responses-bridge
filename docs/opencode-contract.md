@@ -121,9 +121,12 @@ must not invoke its local Exa/Parallel search implementation for that item.
 - Terminal usage contains SDK-reported input, output, cache-read, reasoning, and
   total tokens.
 - `text.format` `json_object` and `json_schema` are supported by strict
-  instruction plus terminal validation. Copilot does not expose a native
-  response-format control, so malformed model output fails closed with
-  `structured_output_invalid`.
+  instruction plus terminal validation using pinned Ajv JSON Schema 2020-12
+  and pinned format assertions. Unresolvable or unsupported schemas are rejected
+  before inference; malformed or nonconforming model output fails closed with
+  `structured_output_invalid`. Copilot does not expose a native response-format
+  control, and OpenCode's downstream schema validation remains the final
+  authority.
 - The SDK does not expose GitHub-provider temperature, top-p, or max-output
   controls. Those request fields are accepted for protocol compatibility but
   are advisory; model policy remains authoritative.

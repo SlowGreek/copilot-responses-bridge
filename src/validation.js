@@ -1,3 +1,6 @@
+import Ajv2020 from "ajv/dist/2020.js";
+import addFormats from "ajv-formats";
+
 const MAX_INPUT_ITEMS = 256;
 const MAX_TOOLS = 128;
 const MAX_STRING_BYTES = 2 * 1024 * 1024;
@@ -8,6 +11,14 @@ const TEXT_VERBOSITIES = new Set(["low", "medium", "high"]);
 const HOSTED_SEARCH_TYPES = new Set(["web_search", "web_search_preview"]);
 const MAX_JSON_DEPTH = 64;
 const MAX_JSON_NODES = 100_000;
+const structuredAjv = new Ajv2020({
+  strict: true,
+  allErrors: false,
+  validateFormats: true,
+  logger: false,
+});
+addFormats(structuredAjv);
+const structuredValidators = new WeakMap();
 
 export class BridgeRequestError extends Error {
   constructor(message, { statusCode = 400, code = "invalid_request_error" } = {}) {
@@ -143,6 +154,19 @@ function validateJsonSchema(schema, label) {
   }
 }
 
+function structuredSchemaValidator(schema, { request = false } = {}) {
+  const cached = structuredValidators.get(schema);
+  if (cached) return cached;
+  try {
+    const validator = structuredAjv.compile(schema);
+    structuredValidators.set(schema, validator);
+    return validator;
+  } catch {
+    if (request) invalid("text.format.schema is invalid or uses unsupported JSON Schema features");
+    throw structuredInvalid("structured output schema could not be enforced");
+  }
+}
+
 function validateTools(tools) {
   if (tools === undefined) return [];
   if (!Array.isArray(tools) || tools.length > MAX_TOOLS) {
@@ -191,6 +215,7 @@ function validateText(text) {
   boundedString(text.format.name, "text.format.name");
   boundedString(text.format.description, "text.format.description", { optional: true });
   validateJsonSchema(text.format.schema, "text.format.schema");
+  structuredSchemaValidator(text.format.schema, { request: true });
   if (text.format.strict !== undefined && typeof text.format.strict !== "boolean") {
     invalid("text.format.strict must be boolean");
   }
@@ -247,64 +272,6 @@ function structuredInvalid(message) {
   });
 }
 
-function validateSchemaValue(value, schema, path = "$") {
-  if (!isPlainObject(schema)) return;
-  if (Array.isArray(schema.enum) && !schema.enum.some((entry) => JSON.stringify(entry) === JSON.stringify(value))) {
-    throw structuredInvalid(`structured output does not match enum at ${path}`);
-  }
-  if ("const" in schema && JSON.stringify(schema.const) !== JSON.stringify(value)) {
-    throw structuredInvalid(`structured output does not match const at ${path}`);
-  }
-  if (Array.isArray(schema.allOf)) {
-    for (const entry of schema.allOf) validateSchemaValue(value, entry, path);
-  }
-  if (Array.isArray(schema.anyOf)) {
-    const matches = schema.anyOf.some((entry) => {
-      try {
-        validateSchemaValue(value, entry, path);
-        return true;
-      } catch {
-        return false;
-      }
-    });
-    if (!matches) throw structuredInvalid(`structured output does not match anyOf at ${path}`);
-  }
-  if (schema.type === "object") {
-    if (!isPlainObject(value)) throw structuredInvalid(`structured output must be an object at ${path}`);
-    for (const required of schema.required ?? []) {
-      if (!(required in value)) throw structuredInvalid(`structured output is missing ${path}.${required}`);
-    }
-    for (const [key, child] of Object.entries(schema.properties ?? {})) {
-      if (key in value) validateSchemaValue(value[key], child, `${path}.${key}`);
-    }
-    if (schema.additionalProperties === false) {
-      const allowed = new Set(Object.keys(schema.properties ?? {}));
-      for (const key of Object.keys(value)) {
-        if (!allowed.has(key)) throw structuredInvalid(`structured output has unexpected ${path}.${key}`);
-      }
-    }
-  }
-  if (schema.type === "array") {
-    if (!Array.isArray(value)) throw structuredInvalid(`structured output must be an array at ${path}`);
-    for (const [index, entry] of value.entries()) validateSchemaValue(entry, schema.items ?? {}, `${path}[${index}]`);
-  }
-  if (schema.type === "string" && typeof value !== "string") {
-    throw structuredInvalid(`structured output must be a string at ${path}`);
-  }
-  if (schema.type === "number" && (typeof value !== "number" || !Number.isFinite(value))) {
-    throw structuredInvalid(`structured output must be a number at ${path}`);
-  }
-  if (schema.type === "integer" && !Number.isInteger(value)) {
-    throw structuredInvalid(`structured output must be an integer at ${path}`);
-  }
-  if (schema.type === "boolean" && typeof value !== "boolean") {
-    throw structuredInvalid(`structured output must be boolean at ${path}`);
-  }
-  if (schema.type === "null" && value !== null) {
-    throw structuredInvalid(`structured output must be null at ${path}`);
-  }
-}
-
 export function validateStructuredOutput(text, format) {
   if (!format) return;
   let value;
@@ -316,7 +283,9 @@ export function validateStructuredOutput(text, format) {
   if (format.type === "json_object" && !isPlainObject(value)) {
     throw structuredInvalid("structured output must be a JSON object");
   }
-  if (format.type === "json_schema") validateSchemaValue(value, format.schema);
+  if (format.type === "json_schema" && !structuredSchemaValidator(format.schema)(value)) {
+    throw structuredInvalid("model output did not satisfy the complete JSON Schema");
+  }
 }
 
 export function structuredOutputInstruction(format) {

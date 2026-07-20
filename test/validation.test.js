@@ -97,8 +97,74 @@ test("validates strict structured output", () => {
   };
   assert.doesNotThrow(() => validateStructuredOutput("{\"answer\":\"yes\"}", format));
   assert.throws(() => validateStructuredOutput("not json", format), /invalid JSON/);
-  assert.throws(() => validateStructuredOutput("{\"answer\":1}", format), /must be a string/);
-  assert.throws(() => validateStructuredOutput("{\"answer\":\"yes\",\"extra\":true}", format), /unexpected/);
+  assert.throws(() => validateStructuredOutput("{\"answer\":1}", format), /complete JSON Schema/);
+  assert.throws(() => validateStructuredOutput("{\"answer\":\"yes\",\"extra\":true}", format), /complete JSON Schema/);
+});
+
+test("enforces refs, combinators, formats, patterns, and bounds with pinned JSON Schema 2020-12", () => {
+  const format = {
+    type: "json_schema",
+    name: "advanced",
+    schema: {
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      $defs: {
+        code: { type: "string", pattern: "^[A-Z]{3}$", minLength: 3, maxLength: 3 },
+      },
+      type: "object",
+      properties: {
+        code: { $ref: "#/$defs/code" },
+        email: { type: "string", format: "email" },
+        score: { type: "number", minimum: 0, maximum: 10 },
+        tags: { type: "array", minItems: 1, maxItems: 2, items: { type: "string" } },
+        mode: { oneOf: [{ const: "fast" }, { const: "safe" }] },
+        forbidden: false,
+      },
+      required: ["code", "email", "score", "tags", "mode"],
+      not: { properties: { forbidden: {} }, required: ["forbidden"] },
+      additionalProperties: false,
+    },
+  };
+  const requestWithFormat = request({ text: { format } });
+  assert.doesNotThrow(() => validateResponsesRequest(requestWithFormat));
+  const valid = {
+    code: "ABC",
+    email: "user@example.com",
+    score: 7,
+    tags: ["one"],
+    mode: "safe",
+  };
+  assert.doesNotThrow(() => validateStructuredOutput(JSON.stringify(valid), format));
+  for (const invalid of [
+    { ...valid, code: "bad" },
+    { ...valid, email: "not-an-email" },
+    { ...valid, score: 12 },
+    { ...valid, tags: [] },
+    { ...valid, mode: "other" },
+    { ...valid, forbidden: true },
+  ]) {
+    assert.throws(() => validateStructuredOutput(JSON.stringify(invalid), format), /complete JSON Schema/);
+  }
+});
+
+test("rejects schemas the pinned validator cannot fully enforce", () => {
+  assert.throws(() => validateResponsesRequest(request({
+    text: {
+      format: {
+        type: "json_schema",
+        name: "remote",
+        schema: { $ref: "https://example.com/remote-schema.json" },
+      },
+    },
+  })), /invalid or uses unsupported/);
+  assert.throws(() => validateResponsesRequest(request({
+    text: {
+      format: {
+        type: "json_schema",
+        name: "unknown",
+        schema: { type: "string", unsupportedKeyword: true },
+      },
+    },
+  })), /invalid or uses unsupported/);
 });
 
 test("rejects unavailable models and malformed numeric options", () => {

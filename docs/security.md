@@ -87,3 +87,8 @@ before reporting readiness.
 | JSON nesting | 64 levels |
 | Provider continuation | 5 minutes |
 | Provider turn | 10 minutes |
+
+Structured output uses exact pinned Ajv JSON Schema 2020-12 and `ajv-formats`
+validation. Schema compilation is strict: unsupported keywords, unknown
+formats, and unresolvable references are rejected before model inference.
+OpenCode must still perform its own final schema validation.
