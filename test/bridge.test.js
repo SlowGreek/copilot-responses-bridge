@@ -402,6 +402,7 @@ test("returns external tool calls to OpenCode and round-trips all results", asyn
   const first = new FakeResponse();
   await bridge.handle(baseRequest({
     parallel_tool_calls: true,
+    input: [{ role: "user", content: [{ type: "input_text", text: "weather and time" }] }],
     tools: [
       {
         type: "function",
@@ -529,13 +530,6 @@ test("binds tool continuations to matching history and model", async () => {
     event.type === "response.output_item.done" && event.item.type === "function_call").item;
   await assert.rejects(
     bridge.handle(baseRequest({
-      input: [{ type: "function_call_output", call_id: call.call_id, output: "result" }],
-      tools: [{ type: "function", name: "lookup", description: "Lookup", parameters: { type: "object" } }],
-    }), new FakeResponse()),
-    (error) => error.code === "provider_continuation_history_mismatch",
-  );
-  await assert.rejects(
-    bridge.handle(baseRequest({
       model: "other-model",
       input: [
         {
@@ -569,6 +563,55 @@ test("binds tool continuations to matching history and model", async () => {
   await bridge.stop();
 });
 
+test("aborts a pending continuation when canonical history is rewound or edited", async () => {
+  const client = new FakeClient([{}, {}]);
+  const bridge = newBridge(client);
+  const tools = [{ type: "function", name: "lookup", description: "Lookup", parameters: { type: "object" } }];
+  const initialInput = [
+    { role: "user", content: [{ type: "input_text", text: "original question" }] },
+    { role: "assistant", content: [{ type: "output_text", text: "prior answer" }] },
+    { role: "user", content: [{ type: "input_text", text: "branch question" }] },
+  ];
+  const first = new FakeResponse();
+  await bridge.handle(baseRequest({
+    prompt_cache_key: "history-session",
+    input: initialInput,
+    tools,
+  }), first);
+  const call = sseEvents(first).find((event) =>
+    event.type === "response.output_item.done" && event.item.type === "function_call").item;
+  const revertedInput = [
+    initialInput[0],
+    { role: "user", content: [{ type: "input_text", text: "reverted replacement" }] },
+    {
+      type: "function_call",
+      call_id: call.call_id,
+      name: call.name,
+      arguments: call.arguments,
+    },
+    { type: "function_call_output", call_id: call.call_id, output: "result" },
+  ];
+  const revertedRequest = baseRequest({
+    prompt_cache_key: "history-session",
+    input: revertedInput,
+    tools,
+  });
+  await assert.rejects(
+    bridge.handle(revertedRequest, new FakeResponse()),
+    (error) => error.code === "provider_continuation_history_mismatch",
+  );
+  assert.equal(client.sessions[0].aborted, true);
+  assert.equal(client.sessions[0].disconnected, true);
+
+  const retried = new FakeResponse();
+  await bridge.handle(revertedRequest, retried);
+  assert.equal(client.sessions.length, 2);
+  const transcript = providerTranscript(client.sessions[1]);
+  const serialized = JSON.stringify(transcript);
+  assert.match(serialized, /reverted replacement/u);
+  assert.doesNotMatch(serialized, /prior answer|branch question/u);
+});
+
 test("aborts a pending continuation when tool_choice becomes none and retries fresh", async () => {
   const client = new FakeClient([{}, { text: "reconfigured safely" }]);
   const bridge = newBridge(client);
@@ -593,6 +636,7 @@ test("aborts a pending continuation when tool_choice becomes none and retries fr
     tool_choice: "none",
     reasoning: { effort: "high" },
     input: [
+      { role: "user", content: [{ type: "input_text", text: "hi" }] },
       {
         type: "function_call",
         call_id: call.call_id,
@@ -636,6 +680,7 @@ test("rejects continuation after any declared tool is removed", async () => {
       prompt_cache_key: "tool-removal-session",
       tools: [originalTools[0]],
       input: [
+        { role: "user", content: [{ type: "input_text", text: "hi" }] },
         {
           type: "function_call",
           call_id: call.call_id,
@@ -662,6 +707,7 @@ test("treats historical tool outputs as history after provider continuation is c
     event.type === "response.output_item.done" && event.item.type === "function_call").item;
   await bridge.handle(baseRequest({
     input: [
+      { role: "user", content: [{ type: "input_text", text: "hi" }] },
       {
         type: "function_call",
         call_id: call.call_id,

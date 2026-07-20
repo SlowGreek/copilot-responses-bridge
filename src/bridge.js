@@ -125,6 +125,12 @@ export function providerConfigurationHash(request) {
     .digest("hex");
 }
 
+export function providerHistoryHash(input) {
+  return createHash("sha256")
+    .update(JSON.stringify(canonicalValue(input)))
+    .digest("hex");
+}
+
 export class CopilotResponsesBridge {
   constructor({
     client,
@@ -234,6 +240,8 @@ export class CopilotResponsesBridge {
     return {
       request,
       configurationHash: providerConfigurationHash(request),
+      historyHash: providerHistoryHash(request.input),
+      historyLength: request.input.length,
       session: undefined,
       turn: undefined,
       pending: new Map(),
@@ -403,6 +411,27 @@ export class CopilotResponsesBridge {
         code: "provider_continuation_session_mismatch",
       });
     }
+    const prefix = request.input.slice(0, continuation.historyLength);
+    const suffix = request.input.slice(continuation.historyLength);
+    const suffixIsPendingData = suffix.every((item) => {
+      if (item.type === "function_call" || item.type === "custom_tool_call") {
+        const pending = continuation.pending.get(item.call_id);
+        return pending?.name === item.name;
+      }
+      if (item.type === "function_call_output" || item.type === "custom_tool_call_output") {
+        return continuation.pending.has(item.call_id);
+      }
+      return false;
+    });
+    if (request.input.length < continuation.historyLength
+        || providerHistoryHash(prefix) !== continuation.historyHash
+        || !suffixIsPendingData) {
+      await this.disposeContinuation(continuation);
+      throw new BridgeRequestError("canonical history changed during tool execution; retry the canonical turn", {
+        statusCode: 409,
+        code: "provider_continuation_history_mismatch",
+      });
+    }
     const supplied = new Map(outputs.map((output) => [output.callId, output]));
     const calls = new Map(request.input
       .filter((item) => item.type === "function_call" || item.type === "custom_tool_call")
@@ -410,6 +439,7 @@ export class CopilotResponsesBridge {
     for (const [callId, pending] of continuation.pending) {
       const call = calls.get(callId);
       if (!call || call.name !== pending.name) {
+        await this.disposeContinuation(continuation);
         throw new BridgeRequestError("tool result history does not match the pending provider call", {
           statusCode: 409,
           code: "provider_continuation_history_mismatch",
