@@ -3,10 +3,13 @@ import { lstat, open } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { TextDecoder } from "node:util";
+import { BridgeRequestError } from "./validation.js";
 
 const MAX_PASTED_TEXT_BYTES = 8 * 1024 * 1024;
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const PASTED_TEXT_PATH = /(?:^|[\s("'`])((?:\/[^\s/"'`<>]+)*\/pasted-text(?:-\d+)?\.txt)(?=$|[\s)"'`,.;:!?])/gmu;
 const INVALID_TEXT_CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u;
+const IMAGE_DATA_URI = /^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/]+={0,2})$/u;
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
 export function responseId() {
@@ -59,8 +62,13 @@ export function requestUsesWebSearch(tools = []) {
 }
 
 export function dataUriToBlob(imageUrl) {
-  const match = /^data:([^;,]+);base64,(.+)$/s.exec(imageUrl ?? "");
-  if (!match) return null;
+  const match = IMAGE_DATA_URI.exec(imageUrl ?? "");
+  if (!match) throw new BridgeRequestError("images must use a supported base64 data URI");
+  const decoded = Buffer.from(match[2], "base64");
+  if (decoded.length > MAX_IMAGE_BYTES) throw new BridgeRequestError("image exceeds the 5 MiB limit");
+  if (decoded.toString("base64").replace(/=+$/u, "") !== match[2].replace(/=+$/u, "")) {
+    throw new BridgeRequestError("image data is malformed");
+  }
   return { type: "blob", mimeType: match[1], data: match[2] };
 }
 
@@ -68,11 +76,11 @@ function pastedTextPaths(text) {
   return [...text.matchAll(PASTED_TEXT_PATH)].map((match) => match[1]);
 }
 
-async function inspectPathComponents(filePath) {
-  const parsed = path.parse(filePath);
-  let current = parsed.root;
+async function inspectPathComponents(filePath, pasteDirectory) {
+  let current = pasteDirectory;
   let finalStats;
-  for (const component of filePath.slice(parsed.root.length).split(path.sep)) {
+  const relative = path.relative(pasteDirectory, filePath);
+  for (const component of relative.split(path.sep)) {
     if (!component || component === "." || component === "..") {
       throw Object.assign(new Error("unsafe path"), { code: "UNSAFE_PATH" });
     }
@@ -85,15 +93,20 @@ async function inspectPathComponents(filePath) {
   return finalStats;
 }
 
-async function readPastedText(filePath, remainingBytes) {
+async function readPastedText(filePath, remainingBytes, pasteDirectory) {
+  if (!pasteDirectory) return { reason: "paste expansion is disabled" };
   if (remainingBytes <= 0) return { reason: "aggregate paste limit reached" };
   let handle;
   try {
-    const lexicalComponents = filePath.slice(path.parse(filePath).root.length).split(path.sep);
+    const relative = path.relative(pasteDirectory, filePath);
+    if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      return { reason: "path is outside the allowed paste directory" };
+    }
+    const lexicalComponents = relative.split(path.sep);
     if (lexicalComponents.some((component) => component === "." || component === "..")) {
       return { reason: "unsafe path" };
     }
-    const beforeOpen = await inspectPathComponents(filePath);
+    const beforeOpen = await inspectPathComponents(filePath, pasteDirectory);
     if (!beforeOpen.isFile()) return { reason: "not a regular file" };
     handle = await open(
       filePath,
@@ -101,6 +114,7 @@ async function readPastedText(filePath, remainingBytes) {
     );
     const stats = await handle.stat();
     if (!stats.isFile()) return { reason: "not a regular file" };
+    if (stats.nlink !== 1) return { reason: "hard-linked files are not allowed" };
     if (beforeOpen.dev !== stats.dev || beforeOpen.ino !== stats.ino) {
       return { reason: "file changed during validation" };
     }
@@ -137,7 +151,7 @@ async function readPastedText(filePath, remainingBytes) {
   }
 }
 
-async function expandPastedText(text) {
+export async function expandPastedText(text, { pasteDirectory } = {}) {
   const references = pastedTextPaths(text);
   if (!references.length) return text;
 
@@ -155,7 +169,11 @@ async function expandPastedText(text) {
       additions.push(`[Pasted text "${source}" was not expanded: unsafe path.]`);
       continue;
     }
-    const result = await readPastedText(resolved, MAX_PASTED_TEXT_BYTES - expandedBytes);
+    const result = await readPastedText(
+      resolved,
+      MAX_PASTED_TEXT_BYTES - expandedBytes,
+      pasteDirectory,
+    );
     if (result.content === undefined) {
       additions.push(`[Pasted text "${source}" was not expanded: ${result.reason}.]`);
       continue;
@@ -170,7 +188,7 @@ async function expandPastedText(text) {
   return additions.length ? `${text}\n\n${additions.join("\n\n")}` : text;
 }
 
-export async function newestUserMessage(input = []) {
+export async function newestUserMessage(input = [], options = {}) {
   for (let i = input.length - 1; i >= 0; i -= 1) {
     const item = input[i];
     if (item?.type === "message" && item.role === "user") {
@@ -178,16 +196,81 @@ export async function newestUserMessage(input = []) {
       const attachments = [];
       for (const part of item.content ?? []) {
         if (part.type === "input_text") text.push(part.text ?? "");
-        if (part.type === "input_image") {
-          const blob = dataUriToBlob(part.image_url);
-          if (blob) attachments.push(blob);
-          else text.push(`[Image URL: ${part.image_url}]`);
-        }
+        if (part.type === "input_image") attachments.push(dataUriToBlob(part.image_url));
       }
-      return { prompt: await expandPastedText(text.join("\n")), attachments };
+      return { prompt: await expandPastedText(text.join("\n"), options), attachments };
     }
   }
   return { prompt: "", attachments: [] };
+}
+
+function textFromToolOutput(output, attachments) {
+  if (typeof output === "string") return output;
+  const text = [];
+  for (const part of output) {
+    if (part.type === "input_text") text.push(part.text);
+    if (part.type === "input_image") {
+      attachments.push(dataUriToBlob(part.image_url));
+      text.push("[image tool output attached]");
+    }
+  }
+  return text.join("\n");
+}
+
+export async function providerMessage(input = [], options = {}) {
+  const attachments = [];
+  const sections = [];
+  let newestUserIndex = -1;
+  for (let index = input.length - 1; index >= 0; index -= 1) {
+    if (input[index]?.role === "user") {
+      newestUserIndex = index;
+      break;
+    }
+  }
+  for (const [index, item] of input.entries()) {
+    if (item.role === "system") {
+      sections.push(`[system]\n${item.content}`);
+      continue;
+    }
+    if (item.role === "user") {
+      const text = [];
+      for (const part of item.content) {
+        if (part.type === "input_text") text.push(part.text);
+        if (part.type === "input_image") {
+          attachments.push(dataUriToBlob(part.image_url));
+          text.push("[user image attached]");
+        }
+      }
+      const content = index === newestUserIndex
+        ? await expandPastedText(text.join("\n"), options)
+        : text.join("\n");
+      sections.push(`[user]\n${content}`);
+      continue;
+    }
+    if (item.role === "assistant") {
+      sections.push(`[assistant]\n${item.content.map((part) => part.text).join("\n")}`);
+      continue;
+    }
+    if (item.type === "function_call" || item.type === "custom_tool_call") {
+      sections.push([
+        `[assistant tool call: ${item.name}; call_id=${item.call_id}]`,
+        item.type === "function_call" ? item.arguments : item.input,
+      ].join("\n"));
+      continue;
+    }
+    if (item.type === "function_call_output" || item.type === "custom_tool_call_output") {
+      sections.push([
+        `[tool result; call_id=${item.call_id}]`,
+        textFromToolOutput(item.output, attachments),
+      ].join("\n"));
+      continue;
+    }
+    if (item.type === "reasoning") {
+      const summary = item.summary.map((part) => part.text).join("\n");
+      if (summary) sections.push(`[assistant reasoning summary]\n${summary}`);
+    }
+  }
+  return { prompt: sections.join("\n\n") || "Continue.", attachments };
 }
 
 export function toolOutputs(input = []) {
@@ -218,15 +301,11 @@ export function toCopilotToolResult(output) {
     if (part?.type === "input_text") text.push(part.text ?? "");
     if (part?.type === "input_image") {
       const blob = dataUriToBlob(part.image_url);
-      if (blob) {
-        binaryResultsForLlm.push({
-          type: "image",
-          data: blob.data,
-          mimeType: blob.mimeType,
-        });
-      } else {
-        text.push(`[Image URL: ${part.image_url}]`);
-      }
+      binaryResultsForLlm.push({
+        type: "image",
+        data: blob.data,
+        mimeType: blob.mimeType,
+      });
     }
     if (part?.type === "input_audio") text.push(`[Audio URL: ${part.audio_url}]`);
   }

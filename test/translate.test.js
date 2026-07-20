@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, realpath, rm, symlink, truncate, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, realpath, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -62,6 +62,18 @@ test("translates text and image user input", async () => {
   assert.deepEqual(result.attachments, [{ type: "blob", mimeType: "image/png", data: "YWJj" }]);
 });
 
+test("rejects remote, malformed, and oversized images", async () => {
+  const message = (image_url) => newestUserMessage([{
+    type: "message",
+    role: "user",
+    content: [{ type: "input_image", image_url }],
+  }]);
+  await assert.rejects(message("https://example.com/image.png"), /base64 data URI/);
+  await assert.rejects(message("data:image/png;base64,%%%"), /base64 data URI/);
+  const oversized = Buffer.alloc((5 * 1024 * 1024) + 1).toString("base64");
+  await assert.rejects(message(`data:image/png;base64,${oversized}`), /5 MiB/);
+});
+
 test("expands a canonical Codex pasted-text reference", async () => {
   await withTempDirectory(async (directory) => {
     const pasted = path.join(directory, "pasted-text.txt");
@@ -71,7 +83,7 @@ test("expands a canonical Codex pasted-text reference", async () => {
       type: "message",
       role: "user",
       content: [{ type: "input_text", text: original }],
-    }]);
+    }], { pasteDirectory: directory });
     assert.match(result.prompt, new RegExp(`^${original.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
     assert.match(result.prompt, /--- BEGIN PASTED TEXT: pasted-text\.txt ---\nalpha\nbeta\n--- END PASTED TEXT/);
   });
@@ -85,7 +97,7 @@ test("expands a standalone numbered pasted-text path", async () => {
       type: "message",
       role: "user",
       content: [{ type: "input_text", text: pasted }],
-    }]);
+    }], { pasteDirectory: directory });
     assert.match(result.prompt, /BEGIN PASTED TEXT: pasted-text-2\.txt/);
     assert.match(result.prompt, /standalone content/);
   });
@@ -99,7 +111,7 @@ test("deduplicates repeated pasted-text references", async () => {
       type: "message",
       role: "user",
       content: [{ type: "input_text", text: `${pasted}\nRead ${pasted}` }],
-    }]);
+    }], { pasteDirectory: directory });
     assert.equal(result.prompt.match(/BEGIN PASTED TEXT/g)?.length, 1);
     assert.equal(result.prompt.match(/only once/g)?.length, 1);
   });
@@ -117,7 +129,7 @@ test("reports missing and oversized pasted-text files without throwing", async (
       type: "message",
       role: "user",
       content: [{ type: "input_text", text: `${missing}\n${oversized}\n${nonRegular}` }],
-    }]);
+    }], { pasteDirectory: directory });
     assert.match(result.prompt, /pasted-text\.txt" was not expanded: file is unavailable/);
     assert.match(result.prompt, /pasted-text-1\.txt" was not expanded: file exceeds the 8 MiB limit/);
     assert.match(result.prompt, /pasted-text-2\.txt" was not expanded: not a regular file/);
@@ -143,10 +155,33 @@ test("rejects pasted-text symlinks", async () => {
         type: "input_text",
         text: `${pasted}\n${path.join(linkedDirectory, "pasted-text-1.txt")}`,
       }],
-    }]);
+    }], { pasteDirectory: directory });
     assert.equal(result.prompt.match(/was not expanded: unsafe symlink path/g)?.length, 2);
     assert.doesNotMatch(result.prompt, /must not be read/);
     assert.doesNotMatch(result.prompt, /parent symlink content/);
+  });
+
+  test("rejects hard-linked pasted text and paths outside the allowlist", async () => {
+    await withTempDirectory(async (directory) => {
+      const allowed = path.join(directory, "allowed");
+      const outside = path.join(directory, "outside");
+      await mkdir(allowed);
+      await mkdir(outside);
+      const source = path.join(outside, "private.txt");
+      const hardLink = path.join(allowed, "pasted-text.txt");
+      const outsidePaste = path.join(outside, "pasted-text-1.txt");
+      await writeFile(source, "hard-link secret");
+      await link(source, hardLink);
+      await writeFile(outsidePaste, "outside secret");
+      const result = await newestUserMessage([{
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: `${hardLink}\n${outsidePaste}` }],
+      }], { pasteDirectory: allowed });
+      assert.match(result.prompt, /hard-linked files are not allowed/);
+      assert.match(result.prompt, /path is outside the allowed paste directory/);
+      assert.doesNotMatch(result.prompt, /hard-link secret|outside secret/);
+    });
   });
 });
 
@@ -160,7 +195,7 @@ test("rejects invalid UTF-8 and binary pasted-text files", async () => {
       type: "message",
       role: "user",
       content: [{ type: "input_text", text: `${invalid}\n${binary}` }],
-    }]);
+    }], { pasteDirectory: directory });
     assert.match(result.prompt, /pasted-text\.txt" was not expanded: file is not valid UTF-8 text/);
     assert.match(result.prompt, /pasted-text-1\.txt" was not expanded: file appears to contain binary data/);
   });
@@ -191,7 +226,7 @@ test("bounds aggregate pasted-text expansion", async () => {
       type: "message",
       role: "user",
       content: [{ type: "input_text", text: `${first}\n${second}` }],
-    }]);
+    }], { pasteDirectory: directory });
     assert.match(result.prompt, /BEGIN PASTED TEXT: pasted-text\.txt/);
     assert.match(result.prompt, /pasted-text-1\.txt" was not expanded: aggregate paste limit reached/);
   });

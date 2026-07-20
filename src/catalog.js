@@ -2,10 +2,10 @@ import { mkdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const BASE_INSTRUCTIONS = [
-  "You are Codex, a coding agent working in the user's repository.",
-  "Follow the developer and user instructions supplied with each conversation.",
-  "Use the provided tools for terminal commands, file changes, and external actions; never claim a tool action without calling the tool.",
-  "Continue until the user's task is genuinely handled, and communicate progress and results concisely.",
+  "You are the model provider for a host coding agent.",
+  "The host owns sessions, tools, permissions, file access, and workflow state.",
+  "Request declared external tools when needed; never claim to have executed them.",
+  "Follow the system and user instructions supplied with each provider turn.",
 ].join("\n");
 
 function effortDescription(effort) {

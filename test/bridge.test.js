@@ -1,7 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -12,30 +11,41 @@ class FakeResponse extends EventEmitter {
   constructor() {
     super();
     this.data = "";
+    this.headers = {};
     this.headersSent = false;
+    this.statusCode = 200;
     this.writableEnded = false;
   }
-  writeHead() { this.headersSent = true; }
-  write(chunk) { this.data += chunk; }
-  end() {
+  writeHead(status, headers = {}) {
+    this.statusCode = status;
+    this.headers = headers;
+    this.headersSent = true;
+  }
+  write(chunk) {
+    this.data += chunk;
+  }
+  end(chunk = "") {
+    this.data += chunk;
     this.writableEnded = true;
     queueMicrotask(() => this.emit("close"));
   }
 }
 
 class FakeSession {
-  constructor(config, { commentaryBeforeTools = false, parallelToolCalls = false } = {}) {
+  constructor(config, behavior = {}) {
     this.config = config;
-    this.commentaryBeforeTools = commentaryBeforeTools;
-    this.parallelToolCalls = parallelToolCalls;
+    this.behavior = behavior;
     this.events = new EventEmitter();
-    this.sessionId = config.sessionId ?? randomUUID();
-    this.models = [];
+    this.messages = [];
+    this.aborted = false;
+    this.disconnected = false;
     this.rpc = {
       tools: {
         handlePendingToolCall: async ({ requestId, result }) => {
-          this.handledTool = { requestId, result };
+          this.handledTools ??= [];
+          this.handledTools.push({ requestId, result });
           queueMicrotask(() => {
+            this.emitUsage();
             this.events.emit("assistant.message_delta", { data: { deltaContent: "tool complete" } });
             this.events.emit("assistant.message", { data: { content: "tool complete" } });
             this.events.emit("session.idle", { data: {} });
@@ -45,23 +55,38 @@ class FakeSession {
       },
     };
   }
-  on(type, handler) { this.events.on(type, handler); }
+  on(type, handler) {
+    this.events.on(type, handler);
+  }
+  emitUsage() {
+    this.events.emit("assistant.usage", {
+      data: {
+        model: this.config.model,
+        inputTokens: 11,
+        outputTokens: 7,
+        cacheReadTokens: 3,
+        reasoningTokens: 2,
+      },
+    });
+  }
   async send(message) {
-    this.sent = message;
+    this.messages.push(message);
+    if (this.behavior.stall) return;
     if (this.config.availableTools.includes("builtin:web_search")) {
       queueMicrotask(() => {
         this.events.emit("assistant.server_tool_progress", {
-          data: { kind: "web_search", outputIndex: 0, status: "searching" },
+          data: { kind: "web_search", status: "searching", query: "current facts" },
         });
         this.events.emit("assistant.message_delta", { data: { deltaContent: "Current answer" } });
         this.events.emit("assistant.server_tool_progress", {
-          data: { kind: "web_search", outputIndex: 0, status: "completed" },
+          data: { kind: "web_search", status: "completed" },
         });
+        this.emitUsage();
         this.events.emit("assistant.message", {
           data: {
             content: "Current answer",
             citations: {
-              sources: [{ id: "source-1", title: "Primary source", url: "https://example.com/source" }],
+              sources: [{ title: "Primary source", url: "https://example.com/source" }],
               spans: [],
             },
           },
@@ -72,78 +97,79 @@ class FakeSession {
     }
     if (this.config.tools.length) {
       queueMicrotask(() => {
-        if (this.commentaryBeforeTools) {
+        if (this.behavior.commentaryBeforeTools) {
           this.events.emit("assistant.message_delta", { data: { deltaContent: "Checking first." } });
           this.events.emit("assistant.message", { data: { content: "Checking first." } });
         }
-        const calls = this.parallelToolCalls
-          ? [
-              { requestId: "request_1", toolCallId: "call_1", arguments: { cmd: "pwd" } },
-              {
-                requestId: "request_2",
-                toolCallId: "call_2",
-                arguments: { input: "*** Begin Patch\n*** End Patch" },
-              },
-            ]
-          : [{ requestId: "request_1", toolCallId: "call_1", arguments: { cmd: "pwd" } }];
-        calls.forEach((call, index) => {
+        const calls = this.behavior.toolCalls ?? [{
+          requestId: "request_1",
+          toolCallId: "call_1",
+          toolName: this.config.tools[0].name,
+          arguments: { city: "Paris" },
+        }];
+        for (const call of calls) {
           this.events.emit("external_tool.requested", {
-            data: {
-              ...call,
-              sessionId: this.sessionId,
-              toolName: this.config.tools[index]?.name ?? this.config.tools[0].name,
-            },
+            data: { sessionId: "sdk-session", ...call },
           });
-        });
+        }
       });
       return;
     }
     queueMicrotask(() => {
-      this.events.emit("assistant.message_delta", { data: { deltaContent: "hello" } });
-      this.events.emit("assistant.message", { data: { content: "hello" } });
+      if (this.behavior.reasoning) {
+        this.events.emit("assistant.reasoning_delta", {
+          data: { reasoningId: "reasoning-1", deltaContent: "brief reasoning" },
+        });
+        this.events.emit("assistant.reasoning", {
+          data: { reasoningId: "reasoning-1", content: "brief reasoning" },
+        });
+      }
+      const content = this.behavior.text ?? "hello";
+      this.events.emit("assistant.message_delta", { data: { deltaContent: content } });
+      this.emitUsage();
+      this.events.emit("assistant.message", { data: { content } });
       this.events.emit("session.idle", { data: {} });
     });
   }
-  async abort() { this.aborted = true; }
-  async setModel(model, options) { this.models.push({ model, options }); }
-  async disconnect() { this.disconnected = true; }
+  async abort() {
+    this.aborted = true;
+  }
+  async disconnect() {
+    this.disconnected = true;
+  }
 }
 
 class FakeClient {
-  constructor(options = {}) {
-    this.options = options;
+  constructor(behaviors = []) {
+    this.behaviors = behaviors;
+    this.sessions = [];
+    this.started = false;
+    this.stopped = false;
   }
-  async start() {}
-  async stop() {}
+  async start() {
+    this.started = true;
+  }
+  async stop() {
+    this.stopped = true;
+  }
   async listModels() {
-    return [{
-      id: "fake-model",
-      name: "Fake Model",
+    return ["fake-model", "other-model"].map((id) => ({
+      id,
+      name: id,
       capabilities: {
         supports: { vision: true, reasoningEffort: true },
-        limits: { max_context_window_tokens: 128000 },
+        limits: { max_context_window_tokens: 128000, max_output_tokens: 32000 },
       },
       policy: { state: "enabled", terms: "" },
       supportedReasoningEfforts: ["low", "medium", "high"],
       defaultReasoningEffort: "medium",
-    }];
+    }));
   }
   async createSession(config) {
-    this.session = new FakeSession(config, this.options);
-    this.created ??= [];
-    this.created.push(this.session);
-    return this.session;
+    const session = new FakeSession(config, this.behaviors[this.sessions.length] ?? this.behaviors.at(-1) ?? {});
+    this.sessions.push(session);
+    return session;
   }
-  async resumeSession(sessionId, config) {
-    this.session = new FakeSession({ ...config, sessionId }, this.options);
-    this.resumed ??= [];
-    this.resumed.push(this.session);
-    return this.session;
-  }
-}
-
-function newBridge(client, statePath = path.join(tmpdir(), `copilot-bridge-test-${randomUUID()}.json`)) {
-  return new CopilotResponsesBridge({ client, statePath });
 }
 
 function sseEvents(response) {
@@ -153,74 +179,271 @@ function sseEvents(response) {
   });
 }
 
-const baseRequest = {
-  model: "fake-model",
-  instructions: "Be useful",
-  input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
-  tools: [],
-  stream: true,
-};
+function baseRequest(overrides = {}) {
+  return {
+    model: "fake-model",
+    instructions: "Be useful",
+    input: [{
+      role: "user",
+      content: [{ type: "input_text", text: "hi" }],
+    }],
+    tools: [],
+    store: false,
+    stream: true,
+    ...overrides,
+  };
+}
+
+function newBridge(client, options = {}) {
+  return new CopilotResponsesBridge({
+    client,
+    timeoutMs: 1_000,
+    continuationTtlMs: 1_000,
+    ...options,
+  });
+}
 
 test("resolves the installed Copilot CLI loader", () => {
   assert.equal(existsSync(COPILOT_CLI_PATH), true);
   assert.equal(path.basename(COPILOT_CLI_PATH), "npm-loader.js");
 });
 
-test("streams a Codex-readable text response", async () => {
-  const client = new FakeClient();
-  const bridge = newBridge(client);
+test("streams an OpenCode-shaped text response with exact lifecycle and usage", async () => {
+  const client = new FakeClient([{ reasoning: true }]);
   const response = new FakeResponse();
-  await bridge.handle(baseRequest, response);
-  await new Promise((resolve) => setImmediate(resolve));
+  await newBridge(client).handle(baseRequest({
+    reasoning: { effort: "high", summary: "auto" },
+    prompt_cache_key: "opencode-session-cache-key",
+  }), response);
   const events = sseEvents(response);
-  assert.deepEqual(events.map((event) => event.type), [
-    "response.created",
-    "response.output_item.added",
+  assert.equal(events[0].type, "response.created");
+  assert.equal(events.at(-1).type, "response.completed");
+  assert.equal(events.at(-1).response.status, "completed");
+  assert.deepEqual(events.at(-1).response.usage, {
+    input_tokens: 11,
+    input_tokens_details: { cached_tokens: 3 },
+    output_tokens: 7,
+    output_tokens_details: { reasoning_tokens: 2 },
+    total_tokens: 18,
+  });
+  const textTypes = events
+    .filter((event) => event.type.includes("output_text") || event.type.includes("content_part"))
+    .map((event) => event.type);
+  assert.deepEqual(textTypes, [
     "response.content_part.added",
     "response.output_text.delta",
     "response.output_text.done",
     "response.content_part.done",
-    "response.output_item.done",
-    "response.completed",
   ]);
-  const lifecycle = events.slice(1, 7);
-  const responseId = events[0].response.id;
-  const itemId = lifecycle[0].item.id;
-  for (const event of lifecycle) {
-    assert.equal(event.response_id, responseId);
-    assert.equal(event.output_index, 0);
-  }
-  for (const event of lifecycle.slice(1, 5)) {
-    assert.equal(event.item_id, itemId);
-    assert.equal(event.content_index, 0);
-  }
-  assert.equal(lifecycle[5].item.id, itemId);
-  assert.equal(lifecycle[5].item.phase, "final_answer");
-  assert.equal(events.at(-1).response.status, "completed");
+  assert.ok(events.some((event) => event.type === "response.reasoning_summary_text.delta"));
+  assert.equal(client.sessions[0].config.reasoningEffort, "high");
+  assert.equal(client.sessions[0].config.reasoningSummary, "concise");
+  assert.equal(client.sessions[0].config.enableSessionTelemetry, false);
 });
 
-test("sends expanded pasted text to Copilot while preserving image attachments", async () => {
-  const directory = await mkdtemp(path.join(await realpath(tmpdir()), "copilot-paste-bridge-test-"));
+test("returns a standard nonstreaming Responses object", async () => {
+  const response = new FakeResponse();
+  await newBridge(new FakeClient()).handle(baseRequest({ stream: false }), response);
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.headers["content-type"], "application/json");
+  const body = JSON.parse(response.data);
+  assert.equal(body.object, "response");
+  assert.equal(body.status, "completed");
+  assert.equal(body.output[0].type, "message");
+  assert.equal(body.output[0].content[0].text, "hello");
+  assert.equal(body.usage.total_tokens, 18);
+});
+
+test("lowers complete OpenCode history into each fresh provider turn without thread ownership", async () => {
+  const client = new FakeClient([{ text: "first" }, { text: "second" }]);
+  const bridge = newBridge(client);
+  await bridge.handle(baseRequest({ prompt_cache_key: "same-session" }), new FakeResponse());
+  await bridge.handle(baseRequest({
+    model: "other-model",
+    prompt_cache_key: "same-session",
+    input: [
+      { role: "user", content: [{ type: "input_text", text: "first question" }] },
+      { role: "assistant", content: [{ type: "output_text", text: "first answer" }] },
+      { role: "user", content: [{ type: "input_text", text: "second question" }] },
+    ],
+  }), new FakeResponse());
+  assert.equal(client.sessions.length, 2);
+  assert.match(client.sessions[1].messages[0].prompt, /\[assistant\]\nfirst answer/);
+  assert.match(client.sessions[1].messages[0].prompt, /\[user\]\nsecond question/);
+  assert.equal(client.sessions[0].disconnected, true);
+  assert.equal(client.sessions[1].config.model, "other-model");
+});
+
+test("returns external tool calls to OpenCode and round-trips all results", async () => {
+  const client = new FakeClient([{
+    commentaryBeforeTools: true,
+    toolCalls: [
+      {
+        requestId: "request_1",
+        toolCallId: "call_1",
+        toolName: "get_weather",
+        arguments: { city: "Paris" },
+      },
+      {
+        requestId: "request_2",
+        toolCallId: "call_2",
+        toolName: "get_time",
+        arguments: { zone: "UTC" },
+      },
+    ],
+  }]);
+  const bridge = newBridge(client);
+  const first = new FakeResponse();
+  await bridge.handle(baseRequest({
+    parallel_tool_calls: false,
+    tools: [
+      {
+        type: "function",
+        name: "get_weather",
+        description: "Weather",
+        parameters: { type: "object", properties: { city: { type: "string" } } },
+      },
+      {
+        type: "function",
+        name: "get_time",
+        description: "Time",
+        parameters: { type: "object", properties: { zone: { type: "string" } } },
+      },
+    ],
+  }), first);
+  const firstEvents = sseEvents(first);
+  const calls = firstEvents
+    .filter((event) => event.type === "response.output_item.done" && event.item.type === "function_call")
+    .map((event) => event.item);
+  assert.deepEqual(calls.map((call) => call.name), ["get_weather", "get_time"]);
+  assert.match(calls[0].call_id, /^call_/);
+  assert.match(calls[1].call_id, /^call_/);
+  assert.notEqual(calls[0].call_id, calls[1].call_id);
+  assert.equal(firstEvents.at(-1).response.parallel_tool_calls, false);
+
+  const second = new FakeResponse();
+  await bridge.handle(baseRequest({
+    input: [
+      { role: "user", content: [{ type: "input_text", text: "weather and time" }] },
+      ...calls.map((call) => ({
+        type: "function_call",
+        call_id: call.call_id,
+        name: call.name,
+        arguments: call.arguments,
+      })),
+      {
+        type: "function_call_output",
+        call_id: calls[0].call_id,
+        output: JSON.stringify({ temperature: 22 }),
+      },
+      {
+        type: "function_call_output",
+        call_id: calls[1].call_id,
+        output: JSON.stringify({ time: "12:00" }),
+      },
+    ],
+    tools: [
+      { type: "function", name: "get_weather", description: "Weather", parameters: { type: "object" } },
+      { type: "function", name: "get_time", description: "Time", parameters: { type: "object" } },
+    ],
+  }), second);
+  assert.deepEqual(client.sessions[0].handledTools, [
+    { requestId: "request_1", result: JSON.stringify({ temperature: 22 }) },
+    { requestId: "request_2", result: JSON.stringify({ time: "12:00" }) },
+  ]);
+  assert.match(second.data, /tool complete/);
+  assert.equal(client.sessions.length, 1);
+  assert.equal(client.sessions[0].disconnected, true);
+});
+
+test("treats historical tool outputs as history after provider continuation is complete", async () => {
+  const client = new FakeClient([{}, { text: "new turn" }]);
+  const bridge = newBridge(client);
+  const first = new FakeResponse();
+  await bridge.handle(baseRequest({
+    tools: [{ type: "function", name: "lookup", description: "Lookup", parameters: { type: "object" } }],
+  }), first);
+  const call = sseEvents(first).find((event) =>
+    event.type === "response.output_item.done" && event.item.type === "function_call").item;
+  await bridge.handle(baseRequest({
+    input: [
+      {
+        type: "function_call",
+        call_id: call.call_id,
+        name: call.name,
+        arguments: call.arguments,
+      },
+      { type: "function_call_output", call_id: call.call_id, output: "done" },
+    ],
+    tools: [{ type: "function", name: "lookup", description: "Lookup", parameters: { type: "object" } }],
+  }), new FakeResponse());
+  await bridge.handle(baseRequest({
+    input: [
+      { type: "function_call_output", call_id: call.call_id, output: "historical" },
+      { role: "user", content: [{ type: "input_text", text: "next question" }] },
+    ],
+  }), new FakeResponse());
+  assert.equal(client.sessions.length, 2);
+  assert.match(client.sessions[1].messages[0].prompt, new RegExp(`\\[tool result; call_id=${call.call_id}\\]\\nhistorical`));
+});
+
+test("exposes Copilot-hosted web search as provider-executed tool metadata with citations", async () => {
+  const response = new FakeResponse();
+  await newBridge(new FakeClient()).handle(baseRequest({
+    tools: [{ type: "web_search", search_context_size: "medium" }],
+  }), response);
+  const events = sseEvents(response);
+  const search = events.find((event) =>
+    event.type === "response.output_item.done" && event.item.type === "web_search_call");
+  assert.ok(search);
+  assert.equal(search.item.status, "completed");
+  assert.deepEqual(search.item.action, { type: "search", query: "current facts" });
+  assert.deepEqual(search.item.results, [{
+    type: "url_citation",
+    title: "Primary source",
+    url: "https://example.com/source",
+  }]);
+  const message = events.find((event) =>
+    event.type === "response.output_item.done" && event.item.type === "message");
+  assert.equal(message.item.content[0].annotations[0].url, "https://example.com/source");
+});
+
+test("preserves custom tool behavior while explicitly overriding SDK built-ins", async () => {
+  const client = new FakeClient([{
+    toolCalls: [{
+      requestId: "request_1",
+      toolCallId: "call_1",
+      toolName: "apply_patch",
+      arguments: { input: "*** Begin Patch\n*** End Patch" },
+    }],
+  }]);
+  const response = new FakeResponse();
+  await newBridge(client).handle(baseRequest({
+    tools: [{ type: "custom", name: "apply_patch", description: "Apply patch" }],
+  }), response);
+  assert.equal(client.sessions[0].config.tools[0].overridesBuiltInTool, true);
+  const call = sseEvents(response).find((event) =>
+    event.type === "response.output_item.done" && event.item.type === "custom_tool_call");
+  assert.equal(call.item.input, "*** Begin Patch\n*** End Patch");
+});
+
+test("sends allowlisted pasted text and images to Copilot", async () => {
+  const directory = await mkdtemp(path.join(await realpath(tmpdir()), "bridge-paste-"));
   try {
     const pasted = path.join(directory, "pasted-text.txt");
     await writeFile(pasted, "bridge-visible paste");
     const client = new FakeClient();
-    const bridge = newBridge(client);
-    await bridge.handle({
-      ...baseRequest,
+    await newBridge(client, { pasteDirectory: directory }).handle(baseRequest({
       input: [{
-        type: "message",
         role: "user",
         content: [
           { type: "input_text", text: `Use ${pasted}` },
           { type: "input_image", image_url: "data:image/png;base64,YWJj" },
         ],
       }],
-    }, new FakeResponse());
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.match(client.session.sent.prompt, /bridge-visible paste/);
-    assert.match(client.session.sent.prompt, /BEGIN PASTED TEXT: pasted-text\.txt/);
-    assert.deepEqual(client.session.sent.attachments, [{
+    }), new FakeResponse());
+    assert.match(client.sessions[0].messages[0].prompt, /bridge-visible paste/);
+    assert.deepEqual(client.sessions[0].messages[0].attachments, [{
       type: "blob",
       mimeType: "image/png",
       data: "YWJj",
@@ -230,204 +453,70 @@ test("sends expanded pasted text to Copilot while preserving image attachments",
   }
 });
 
-test("finalizes commentary before keeping tool execution in the Codex harness", async () => {
-  const client = new FakeClient({ commentaryBeforeTools: true });
-  const bridge = newBridge(client);
-  const response = new FakeResponse();
-  const request = {
-    ...baseRequest,
-    tools: [{ type: "function", name: "shell", parameters: { type: "object" } }],
-    prompt_cache_key: "thread-1",
+test("validates structured nonstreaming output and fails closed on malformed JSON", async () => {
+  const format = {
+    type: "json_schema",
+    name: "answer",
+    strict: true,
+    schema: {
+      type: "object",
+      properties: { answer: { type: "string" } },
+      required: ["answer"],
+      additionalProperties: false,
+    },
   };
-  await bridge.handle(request, response);
-  await new Promise((resolve) => setTimeout(resolve, 40));
-  const events = sseEvents(response);
-  assert.deepEqual(events.map((event) => event.type), [
-    "response.created",
-    "response.output_item.added",
-    "response.content_part.added",
-    "response.output_text.delta",
-    "response.output_text.done",
-    "response.content_part.done",
-    "response.output_item.done",
-    "response.output_item.done",
-    "response.completed",
-  ]);
-  assert.equal(events[6].item.phase, "commentary");
-  assert.equal(events[7].item.type, "function_call");
-  assert.equal(events[7].item.call_id, "call_1");
-  assert.equal(events.at(-1).response.status, "completed");
-  assert.equal(client.session.config.availableTools[0], "custom:*");
-  assert.equal(client.session.config.tools[0].overridesBuiltInTool, true);
-  assert.equal(client.session.config.infiniteSessions.enabled, true);
+  const valid = new FakeResponse();
+  await newBridge(new FakeClient([{ text: "{\"answer\":\"yes\"}" }])).handle(baseRequest({
+    stream: false,
+    text: { format },
+  }), valid);
+  assert.equal(JSON.parse(valid.data).status, "completed");
+
+  const invalid = new FakeResponse();
+  await newBridge(new FakeClient([{ text: "not json" }])).handle(baseRequest({
+    stream: false,
+    text: { format },
+  }), invalid);
+  assert.equal(invalid.statusCode, 502);
+  assert.equal(JSON.parse(invalid.data).error.code, "structured_output_invalid");
 });
 
-test("registers colliding Codex custom and function tools as explicit overrides", async () => {
-  const client = new FakeClient();
+test("cancels and disconnects the provider session when the client closes", async () => {
+  const client = new FakeClient([{ stall: true }]);
   const bridge = newBridge(client);
   const response = new FakeResponse();
-  await bridge.handle({
-    ...baseRequest,
-    tools: [
-      { type: "custom", name: "apply_patch", description: "Apply a patch" },
-      { type: "function", name: "shell", parameters: { type: "object" } },
-    ],
-  }, response);
-  await new Promise((resolve) => setTimeout(resolve, 40));
-  assert.deepEqual(client.session.config.tools.map((tool) => ({
-    name: tool.name,
-    overridesBuiltInTool: tool.overridesBuiltInTool,
-  })), [
-    { name: "apply_patch", overridesBuiltInTool: true },
-    { name: "shell", overridesBuiltInTool: true },
-  ]);
-  assert.match(response.data, /"type":"custom_tool_call"/);
-  assert.match(response.data, /"name":"apply_patch"/);
+  const handling = bridge.handle(baseRequest(), response);
+  await new Promise((resolve) => setImmediate(resolve));
+  response.emit("close");
+  await handling;
+  assert.equal(client.sessions[0].aborted, true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(client.sessions[0].disconnected, true);
 });
 
-test("emits Copilot multi-call batches when parallel_tool_calls is false", async () => {
-  const client = new FakeClient({ parallelToolCalls: true });
-  const bridge = newBridge(client);
+test("rejects unavailable models before creating a provider session", async () => {
+  const client = new FakeClient();
+  await assert.rejects(
+    newBridge(client).handle(baseRequest({ model: "missing-model" }), new FakeResponse()),
+    (error) => error.code === "model_not_found",
+  );
+  assert.equal(client.sessions.length, 0);
+});
+
+test("fails closed when Copilot emits an undeclared or oversized tool call", async () => {
+  const client = new FakeClient([{
+    toolCalls: [{
+      requestId: "request_1",
+      toolCallId: "call_1",
+      toolName: "undeclared",
+      arguments: {},
+    }],
+  }]);
   const response = new FakeResponse();
-  await bridge.handle({
-    ...baseRequest,
-    parallel_tool_calls: false,
-    tools: [
-      { type: "function", name: "shell", parameters: { type: "object" } },
-      { type: "custom", name: "apply_patch", description: "Apply a patch" },
-    ],
-  }, response);
-  await new Promise((resolve) => setTimeout(resolve, 40));
-  const events = sseEvents(response);
-  const calls = events
-    .filter((event) => event.type === "response.output_item.done"
-      && ["function_call", "custom_tool_call"].includes(event.item.type))
-    .map((event) => event.item);
-  assert.deepEqual(calls.map(({ type, name, call_id: callId }) => ({ type, name, callId })), [
-    { type: "function_call", name: "shell", callId: "call_1" },
-    { type: "custom_tool_call", name: "apply_patch", callId: "call_2" },
-  ]);
-  assert.match(calls[0].id, /^fc_/);
-  assert.match(calls[1].id, /^ctc_/);
-  assert.notEqual(calls[0].id, calls[1].id);
-  assert.equal(events.some((event) => event.type === "response.failed"), false);
-  assert.equal(events.at(-1).type, "response.completed");
-  assert.equal(events.at(-1).response.status, "completed");
-});
-
-test("allowlists Copilot web search and emits Responses search events with citations", async () => {
-  const client = new FakeClient();
-  const bridge = newBridge(client);
-  const response = new FakeResponse();
-  await bridge.handle({
-    ...baseRequest,
-    tools: [{ type: "web_search", search_context_size: "medium" }],
-  }, response);
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(client.session.config.availableTools, ["builtin:web_search"]);
-  assert.equal(client.session.config.enableCitations, true);
-  assert.match(response.data, /"type":"web_search_call"/);
-  assert.match(response.data, /"status":"completed"/);
-  assert.match(response.data, /Primary source/);
-  assert.match(response.data, /https:\/\/example\.com\/source/);
-});
-
-test("returns Codex tool output through the persistent SDK RPC", async () => {
-  const client = new FakeClient();
-  const bridge = newBridge(client);
-  const first = new FakeResponse();
-  await bridge.handle({
-    ...baseRequest,
-    prompt_cache_key: "tool-thread",
-    tools: [{ type: "function", name: "shell", parameters: { type: "object" } }],
-  }, first);
-  await new Promise((resolve) => setTimeout(resolve, 40));
-
-  const second = new FakeResponse();
-  await bridge.handle({
-    ...baseRequest,
-    prompt_cache_key: "tool-thread",
-    tools: [{ type: "function", name: "shell", parameters: { type: "object" } }],
-    input: [{ type: "function_call_output", call_id: "call_1", output: "pwd output" }],
-  }, second);
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(client.session.handledTool, { requestId: "request_1", result: "pwd output" });
-  assert.match(second.data, /tool complete/);
-});
-
-test("switches models without losing the SDK conversation", async () => {
-  const client = new FakeClient();
-  const bridge = newBridge(client);
-  await bridge.handle({ ...baseRequest, prompt_cache_key: "model-thread" }, new FakeResponse());
-  await new Promise((resolve) => setImmediate(resolve));
-  await bridge.handle({
-    ...baseRequest,
-    model: "other-model",
-    reasoning: { effort: "high" },
-    prompt_cache_key: "model-thread",
-  }, new FakeResponse());
-  assert.deepEqual(client.session.models.at(-1), {
-    model: "other-model",
-    options: { reasoningEffort: "high" },
-  });
-});
-
-test("resumes the SDK session to apply a changed tool set", async () => {
-  const client = new FakeClient();
-  const bridge = newBridge(client);
-  await bridge.handle({ ...baseRequest, prompt_cache_key: "tools-thread" }, new FakeResponse());
-  await new Promise((resolve) => setImmediate(resolve));
-  await bridge.handle({
-    ...baseRequest,
-    prompt_cache_key: "tools-thread",
-    tools: [{ type: "function", name: "new_tool", parameters: { type: "object" } }],
-  }, new FakeResponse());
-  assert.equal(client.resumed.length, 1);
-  assert.equal(client.resumed[0].config.tools[0].name, "new_tool");
-  assert.equal(client.created[0].disconnected, true);
-});
-
-test("restores a persisted Copilot session after bridge restart", async () => {
-  const statePath = path.join(tmpdir(), `copilot-bridge-resume-${randomUUID()}.json`);
-  const firstClient = new FakeClient();
-  const firstBridge = newBridge(firstClient, statePath);
-  await firstBridge.handle({ ...baseRequest, prompt_cache_key: "restart-thread" }, new FakeResponse());
-  await new Promise((resolve) => setImmediate(resolve));
-  const originalSessionId = firstClient.session.sessionId;
-  await firstBridge.stop();
-
-  const secondClient = new FakeClient();
-  const secondBridge = newBridge(secondClient, statePath);
-  await secondBridge.handle({ ...baseRequest, prompt_cache_key: "restart-thread" }, new FakeResponse());
-  assert.equal(secondClient.resumed[0].sessionId, originalSessionId);
-  assert.equal(secondClient.resumed[0].config.infiniteSessions.enabled, true);
-});
-
-test("recovers a pending Codex tool call after bridge restart", async () => {
-  const statePath = path.join(tmpdir(), `copilot-bridge-pending-${randomUUID()}.json`);
-  const request = {
-    ...baseRequest,
-    prompt_cache_key: "pending-restart-thread",
-    tools: [{ type: "function", name: "shell", parameters: { type: "object" } }],
-  };
-  const firstClient = new FakeClient();
-  const firstBridge = newBridge(firstClient, statePath);
-  await firstBridge.handle(request, new FakeResponse());
-  await new Promise((resolve) => setTimeout(resolve, 40));
-  await firstBridge.stop();
-
-  const secondClient = new FakeClient();
-  const secondBridge = newBridge(secondClient, statePath);
-  const response = new FakeResponse();
-  await secondBridge.handle({
-    ...request,
-    input: [{ type: "function_call_output", call_id: "call_1", output: "recovered output" }],
-  }, response);
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(secondClient.resumed[0].config.continuePendingWork, true);
-  assert.deepEqual(secondClient.session.handledTool, {
-    requestId: "request_1",
-    result: "recovered output",
-  });
-  assert.match(response.data, /tool complete/);
+  await newBridge(client).handle(baseRequest({
+    tools: [{ type: "function", name: "declared", description: "Declared", parameters: { type: "object" } }],
+  }), response);
+  const terminal = sseEvents(response).at(-1);
+  assert.equal(terminal.type, "response.failed");
+  assert.equal(terminal.response.error.code, "invalid_provider_tool_call");
 });
