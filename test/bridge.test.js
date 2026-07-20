@@ -5,7 +5,7 @@ import { existsSync } from "node:fs";
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { COPILOT_CLI_PATH, CopilotResponsesBridge } from "../src/bridge.js";
+import { COPILOT_CLI_PATH, CopilotResponsesBridge, runtimeEnvironment } from "../src/bridge.js";
 
 class FakeResponse extends EventEmitter {
   constructor() {
@@ -72,6 +72,14 @@ class FakeSession {
   async send(message) {
     this.messages.push(message);
     if (this.behavior.stall) return;
+    if (this.behavior.error) {
+      queueMicrotask(() => {
+        this.events.emit("session.error", {
+          data: { message: "sensitive provider detail /private/path" },
+        });
+      });
+      return;
+    }
     if (this.config.availableTools.includes("builtin:web_search")) {
       queueMicrotask(() => {
         this.events.emit("assistant.server_tool_progress", {
@@ -206,6 +214,20 @@ function newBridge(client, options = {}) {
 test("resolves the installed Copilot CLI loader", () => {
   assert.equal(existsSync(COPILOT_CLI_PATH), true);
   assert.equal(path.basename(COPILOT_CLI_PATH), "npm-loader.js");
+});
+
+test("scrubs telemetry exporters from the Copilot runtime environment", () => {
+  const environment = runtimeEnvironment({
+    PATH: "/bin",
+    OTEL_EXPORTER_OTLP_ENDPOINT: "https://collector.example",
+    COPILOT_OTEL_FILE_EXPORTER_PATH: "/private/trace.jsonl",
+    APPLICATIONINSIGHTS_CONNECTION_STRING: "secret",
+  });
+  assert.equal(environment.PATH, "/bin");
+  assert.equal(environment.OTEL_SDK_DISABLED, "true");
+  assert.equal(environment.OTEL_EXPORTER_OTLP_ENDPOINT, undefined);
+  assert.equal(environment.APPLICATIONINSIGHTS_CONNECTION_STRING, undefined);
+  assert.equal(environment.COPILOT_TELEMETRY_DISABLED, "1");
 });
 
 test("streams an OpenCode-shaped text response with exact lifecycle and usage", async () => {
@@ -354,6 +376,41 @@ test("returns external tool calls to OpenCode and round-trips all results", asyn
   assert.match(second.data, /tool complete/);
   assert.equal(client.sessions.length, 1);
   assert.equal(client.sessions[0].disconnected, true);
+});
+
+test("binds tool continuations to matching history and model", async () => {
+  const client = new FakeClient();
+  const bridge = newBridge(client);
+  const first = new FakeResponse();
+  await bridge.handle(baseRequest({
+    tools: [{ type: "function", name: "lookup", description: "Lookup", parameters: { type: "object" } }],
+  }), first);
+  const call = sseEvents(first).find((event) =>
+    event.type === "response.output_item.done" && event.item.type === "function_call").item;
+  await assert.rejects(
+    bridge.handle(baseRequest({
+      input: [{ type: "function_call_output", call_id: call.call_id, output: "result" }],
+      tools: [{ type: "function", name: "lookup", description: "Lookup", parameters: { type: "object" } }],
+    }), new FakeResponse()),
+    (error) => error.code === "provider_continuation_history_mismatch",
+  );
+  await assert.rejects(
+    bridge.handle(baseRequest({
+      model: "other-model",
+      input: [
+        {
+          type: "function_call",
+          call_id: call.call_id,
+          name: call.name,
+          arguments: call.arguments,
+        },
+        { type: "function_call_output", call_id: call.call_id, output: "result" },
+      ],
+      tools: [{ type: "function", name: "lookup", description: "Lookup", parameters: { type: "object" } }],
+    }), new FakeResponse()),
+    (error) => error.code === "provider_continuation_model_mismatch",
+  );
+  await bridge.stop();
 });
 
 test("treats historical tool outputs as history after provider continuation is complete", async () => {
@@ -519,4 +576,14 @@ test("fails closed when Copilot emits an undeclared or oversized tool call", asy
   const terminal = sseEvents(response).at(-1);
   assert.equal(terminal.type, "response.failed");
   assert.equal(terminal.response.error.code, "invalid_provider_tool_call");
+});
+
+test("surfaces retryable provider failure without leaking SDK details", async () => {
+  const response = new FakeResponse();
+  await newBridge(new FakeClient([{ error: true }])).handle(baseRequest(), response);
+  const terminal = sseEvents(response).at(-1);
+  assert.equal(terminal.type, "response.failed");
+  assert.equal(terminal.response.error.code, "copilot_provider_error");
+  assert.equal(terminal.response.error.message, "Copilot provider request failed");
+  assert.doesNotMatch(response.data, /sensitive provider detail|private\/path/);
 });

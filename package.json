@@ -3,9 +3,15 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "A Responses API compatibility bridge from OpenAI Codex to the supported GitHub Copilot SDK.",
+  "description": "A hardened local Responses API provider backed by the supported GitHub Copilot SDK.",
   "scripts": {
+    "build": "node scripts/check.mjs",
+    "lint": "node scripts/check.mjs",
+    "check": "npm run build && npm test && npm audit --omit=dev",
+    "package": "node scripts/package.mjs",
+    "sbom": "node scripts/sbom.mjs",
     "start": "node src/server.js",
+    "start:detached": "node scripts/launch.mjs",
     "test": "node --test"
   },
   "dependencies": {

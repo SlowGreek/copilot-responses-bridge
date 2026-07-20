@@ -239,17 +239,20 @@ export function validateResponsesRequest(value, { allowedModels } = {}) {
   };
 }
 
+function structuredInvalid(message) {
+  return new BridgeRequestError(message, {
+    statusCode: 502,
+    code: "structured_output_invalid",
+  });
+}
+
 function validateSchemaValue(value, schema, path = "$") {
   if (!isPlainObject(schema)) return;
   if (Array.isArray(schema.enum) && !schema.enum.some((entry) => JSON.stringify(entry) === JSON.stringify(value))) {
-    throw new BridgeRequestError(`structured output does not match enum at ${path}`, {
-      code: "structured_output_invalid",
-    });
+    throw structuredInvalid(`structured output does not match enum at ${path}`);
   }
   if ("const" in schema && JSON.stringify(schema.const) !== JSON.stringify(value)) {
-    throw new BridgeRequestError(`structured output does not match const at ${path}`, {
-      code: "structured_output_invalid",
-    });
+    throw structuredInvalid(`structured output does not match const at ${path}`);
   }
   if (Array.isArray(schema.allOf)) {
     for (const entry of schema.allOf) validateSchemaValue(value, entry, path);
@@ -263,18 +266,12 @@ function validateSchemaValue(value, schema, path = "$") {
         return false;
       }
     });
-    if (!matches) throw new BridgeRequestError(`structured output does not match anyOf at ${path}`, {
-      code: "structured_output_invalid",
-    });
+    if (!matches) throw structuredInvalid(`structured output does not match anyOf at ${path}`);
   }
   if (schema.type === "object") {
-    if (!isPlainObject(value)) throw new BridgeRequestError(`structured output must be an object at ${path}`, {
-      code: "structured_output_invalid",
-    });
+    if (!isPlainObject(value)) throw structuredInvalid(`structured output must be an object at ${path}`);
     for (const required of schema.required ?? []) {
-      if (!(required in value)) throw new BridgeRequestError(`structured output is missing ${path}.${required}`, {
-        code: "structured_output_invalid",
-      });
+      if (!(required in value)) throw structuredInvalid(`structured output is missing ${path}.${required}`);
     }
     for (const [key, child] of Object.entries(schema.properties ?? {})) {
       if (key in value) validateSchemaValue(value[key], child, `${path}.${key}`);
@@ -282,42 +279,28 @@ function validateSchemaValue(value, schema, path = "$") {
     if (schema.additionalProperties === false) {
       const allowed = new Set(Object.keys(schema.properties ?? {}));
       for (const key of Object.keys(value)) {
-        if (!allowed.has(key)) throw new BridgeRequestError(`structured output has unexpected ${path}.${key}`, {
-          code: "structured_output_invalid",
-        });
+        if (!allowed.has(key)) throw structuredInvalid(`structured output has unexpected ${path}.${key}`);
       }
     }
   }
   if (schema.type === "array") {
-    if (!Array.isArray(value)) throw new BridgeRequestError(`structured output must be an array at ${path}`, {
-      code: "structured_output_invalid",
-    });
+    if (!Array.isArray(value)) throw structuredInvalid(`structured output must be an array at ${path}`);
     for (const [index, entry] of value.entries()) validateSchemaValue(entry, schema.items ?? {}, `${path}[${index}]`);
   }
   if (schema.type === "string" && typeof value !== "string") {
-    throw new BridgeRequestError(`structured output must be a string at ${path}`, {
-      code: "structured_output_invalid",
-    });
+    throw structuredInvalid(`structured output must be a string at ${path}`);
   }
   if (schema.type === "number" && (typeof value !== "number" || !Number.isFinite(value))) {
-    throw new BridgeRequestError(`structured output must be a number at ${path}`, {
-      code: "structured_output_invalid",
-    });
+    throw structuredInvalid(`structured output must be a number at ${path}`);
   }
   if (schema.type === "integer" && !Number.isInteger(value)) {
-    throw new BridgeRequestError(`structured output must be an integer at ${path}`, {
-      code: "structured_output_invalid",
-    });
+    throw structuredInvalid(`structured output must be an integer at ${path}`);
   }
   if (schema.type === "boolean" && typeof value !== "boolean") {
-    throw new BridgeRequestError(`structured output must be boolean at ${path}`, {
-      code: "structured_output_invalid",
-    });
+    throw structuredInvalid(`structured output must be boolean at ${path}`);
   }
   if (schema.type === "null" && value !== null) {
-    throw new BridgeRequestError(`structured output must be null at ${path}`, {
-      code: "structured_output_invalid",
-    });
+    throw structuredInvalid(`structured output must be null at ${path}`);
   }
 }
 
@@ -327,16 +310,10 @@ export function validateStructuredOutput(text, format) {
   try {
     value = JSON.parse(text);
   } catch {
-    throw new BridgeRequestError("model returned invalid JSON for structured output", {
-      statusCode: 502,
-      code: "structured_output_invalid",
-    });
+    throw structuredInvalid("model returned invalid JSON for structured output");
   }
   if (format.type === "json_object" && !isPlainObject(value)) {
-    throw new BridgeRequestError("structured output must be a JSON object", {
-      statusCode: 502,
-      code: "structured_output_invalid",
-    });
+    throw structuredInvalid("structured output must be a JSON object");
   }
   if (format.type === "json_schema") validateSchemaValue(value, format.schema);
 }

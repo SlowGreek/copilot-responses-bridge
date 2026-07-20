@@ -1,0 +1,111 @@
+# OpenCode Provider Contract
+
+OpenCode remains the only agent harness. The bridge is an authenticated local
+model provider and does not own OpenCode threads, permissions, tools, agents,
+workflows, or UI state.
+
+## Connection
+
+The bridge writes a private `connection.json` into
+`COPILOT_BRIDGE_STATE_DIR` after every successful launch:
+
+```json
+{
+  "version": 1,
+  "base_url": "http://127.0.0.1:4141/v1",
+  "capability_file": "/private/runtime/path/client-capability",
+  "model_catalog_json": "/private/runtime/path/codex-model-catalog.json",
+  "paste_directory": null
+}
+```
+
+OpenCode reads `base_url`, then reads the capability file and configures its
+OpenAI Responses provider with that value as the API key. The provider sends:
+
+```text
+Authorization: Bearer <capability-file contents>
+Host: 127.0.0.1:<port>
+```
+
+The capability rotates at every bridge launch. OpenCode must reread the
+descriptor and capability after a restart. It must never persist the capability
+in project configuration, logs, analytics, or UI state.
+
+## Models
+
+`GET /v1/models` returns the standard list envelope. Entries include standard
+`id`, `object`, `created`, and `owned_by` fields plus:
+
+- `display_name`
+- `context_window`
+- `max_output_tokens`
+- `supports_vision`
+- `supported_reasoning_efforts`
+- `default_reasoning_effort`
+
+Only models enabled by Copilot policy are listed.
+
+## Responses requests
+
+OpenCode sends `POST /v1/responses` with `store:false` and the complete message
+and tool history for each fresh provider turn. The bridge rejects
+`previous_response_id`, `item_reference`, and `store:true`; it does not provide
+or emulate server-side OpenCode thread storage.
+
+Both `stream:true` SSE and nonstreaming JSON responses are supported.
+Cancellation is the HTTP connection closing. OpenCode should retry HTTP 429,
+502, 503, and 504 failures according to its provider policy; malformed requests
+are 4xx and should not be retried unchanged.
+
+`prompt_cache_key` is accepted as an opaque provider cache hint. It is never
+used as a thread or session identifier.
+
+## External tools
+
+Function and custom tool declarations become declaration-only Copilot SDK
+tools. The bridge never runs them. Copilot requests are returned as standard
+Responses function/custom tool-call items; OpenCode authorizes and executes
+them.
+
+The bridge retains only a short-lived, in-memory provider continuation keyed by
+random public call IDs so tool results can complete the same Copilot SDK RPC.
+OpenCode must return every result from a parallel batch together, include the
+matching emitted call items in history, and use the original model. Continuation
+state expires after five minutes and is never persisted across bridge restarts.
+
+`parallel_tool_calls:false` is advisory. A Copilot-emitted batch is still
+returned intact; OpenCode remains responsible for execution policy.
+
+## Provider-hosted web search
+
+OpenCode requests Copilot-hosted search with:
+
+```json
+{ "type": "web_search" }
+```
+
+`web_search_preview` is also accepted. Search is the only Copilot built-in the
+bridge enables. The bridge emits a standard provider-executed
+`web_search_call` item containing `action`, `status`, and sanitized
+`results` URL citations. Final output text also carries URL-citation
+annotations.
+
+OpenCode should project the item as a provider-executed tool call/result and
+must not invoke its local Exa/Parallel search implementation for that item.
+
+## Images, reasoning, usage, and structured output
+
+- Images must be `png`, `jpeg`, `webp`, or `gif` base64 data URIs, at most
+  5 MiB decoded each. Remote URLs are rejected.
+- Copilot reasoning is emitted as standard reasoning-summary lifecycle events.
+- Terminal usage contains SDK-reported input, output, cache-read, reasoning, and
+  total tokens.
+- `text.format` `json_object` and `json_schema` are supported by strict
+  instruction plus terminal validation. Copilot does not expose a native
+  response-format control, so malformed model output fails closed with
+  `structured_output_invalid`.
+- The SDK does not expose GitHub-provider temperature, top-p, or max-output
+  controls. Those request fields are accepted for protocol compatibility but
+  are advisory; model policy remains authoritative.
+
+Responses WebSocket mode and `/responses/compact` are not implemented.

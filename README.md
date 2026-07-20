@@ -1,105 +1,110 @@
 # Copilot Responses Bridge
 
-This is a local compatibility bridge that lets the open-source OpenAI Codex harness use inference from a GitHub Copilot subscription through GitHub's **supported Copilot SDK**.
+A hardened local OpenAI Responses-compatible provider backed by GitHub's
+supported Copilot SDK.
 
-> [!IMPORTANT]
-> This is an independent, experimental community project. It is not affiliated with, endorsed by, or supported by GitHub or OpenAI. GitHub Copilot and OpenAI Codex are trademarks of their respective owners.
+OpenCode (or another client harness) remains the sole owner of agents, threads,
+tools, permissions, files, workflows, and UI. The bridge performs only model
+inference and Copilot provider-hosted web search. External tool calls always
+return to the client for authorization and execution.
 
-Codex still owns the agent loop: tools, shell execution, file edits, approvals, MCP, images returned by tools, steering, and conversation UI remain in Codex. The bridge runs the Copilot SDK in `empty` mode, which disables Copilot's built-in tools, skills, memory, config discovery, and telemetry, and translates model output to the Responses API event stream Codex expects. SDK infinite sessions remain enabled so Copilot can compact long histories in the background.
-
-## Status and important boundary
-
-This is an experimental compatibility layer, not a claim that GitHub exposes a native OpenAI Responses API.
-
-- Supported now: streaming text, function-tool declarations and calls, parallel call batches, text and data-URI image input, multimodal tool output, Copilot-hosted web search with citations, reasoning-effort forwarding, multi-turn sessions, immediate-message steering, model changes, tool-set changes, restart recovery, and automatic long-session compaction.
-- Not equivalent to ChatGPT-backed Codex: encrypted reasoning items/summaries, OpenAI hosted tools, Responses WebSocket mode, `/responses/compact`, exact token usage, service tiers, and OpenAI prompt-caching semantics are not available from the Copilot SDK.
-- Model behavior and image/tool support depend on the model enabled by the work organization. GitHub bills SDK prompts against Copilot premium requests.
-- The Copilot SDK is in public preview. Pin and test SDK upgrades before relying on this bridge for production work.
-
-Every user must authenticate with their own GitHub identity and must have a Copilot plan or other entitlement that permits Copilot SDK access. This project does not provide, proxy, share, or bypass a Copilot subscription.
-
-Do not replace this SDK route with copied tokens and private `api.githubcopilot.com` endpoints. Those endpoints are undocumented, can change without notice, and may violate workplace or GitHub policy.
+> This is an independent experimental community project. It is not affiliated
+> with, endorsed by, or supported by GitHub or OpenAI.
 
 ## Prerequisites
 
 - Node.js 20 or newer.
-- A GitHub Copilot plan on the GitHub identity used locally.
-- For a work-provided plan, the organization/enterprise must allow Copilot CLI/SDK.
-- Authentication by one of the methods supported by the SDK. For an explicit work identity, set `COPILOT_GITHUB_TOKEN` to that user's OAuth token; otherwise the SDK checks stored Copilot credentials and then GitHub CLI credentials.
+- A GitHub identity entitled to Copilot SDK access.
+- Stored Copilot/GitHub CLI authentication, or a per-user
+  `COPILOT_GITHUB_TOKEN` supplied to the bridge process.
 
-The currently selected account can be checked with:
+Each user must authenticate with their own identity. The bridge does not share,
+scrape, or bypass Copilot credentials.
+
+## Install and verify
 
 ```sh
-gh auth status
+npm ci
+npm run check
+npm run sbom
+npm run package
 ```
 
-## Run
+The deterministic package and SHA-256 digest are written to `dist/`; the
+CycloneDX SBOM is `dist/sbom.cdx.json`.
+
+## Start
+
+Choose a durable private state directory. Long-paste expansion is optional and
+requires a separate explicit allowlist directory.
 
 ```sh
-npm install
-npm test
+export COPILOT_BRIDGE_STATE_DIR=/absolute/private/state
+export COPILOT_BRIDGE_PASTE_DIR=/absolute/private/pastes # optional
+export HOST=127.0.0.1
+export PORT=4141
 npm start
 ```
 
-The server binds only to `127.0.0.1` by default and exposes:
-
-- `POST /v1/responses`
-- `GET /v1/models`
-- `GET /healthz`
-
-At startup the bridge asks Copilot for the models enabled for the signed-in account and atomically writes a Codex model-picker catalog to:
-
-```text
-.copilot-bridge/codex-model-catalog.json
-```
-
-Startup fails instead of leaving a stale picker when that refresh is unauthorized. After it starts, you can also inspect the enabled model IDs through:
+Detached launch:
 
 ```sh
-curl http://127.0.0.1:4141/v1/models
+COPILOT_BRIDGE_STATE_DIR=/absolute/private/state npm run start:detached
 ```
 
-A `403 unauthorized: not authorized to use this Copilot feature` means the SDK reached GitHub but the selected identity lacks the entitlement or the work organization has not enabled Copilot CLI/SDK.
+The server refuses non-loopback binds. After startup, read
+`$COPILOT_BRIDGE_STATE_DIR/connection.json`; it identifies the base URL,
+rotated capability file, model catalog, and optional paste directory without
+putting a secret on the command line.
 
-The bridge also writes restart-safe routing state to:
+## HTTP surface
+
+- `GET /healthz` — unauthenticated, metadata-free health.
+- `GET /v1/models` — authenticated enabled-model catalog.
+- `POST /v1/responses` — authenticated streaming or nonstreaming Responses.
+
+All `/v1/*` requests require:
 
 ```text
-.copilot-bridge/bridge-state.json
+Authorization: Bearer <contents of client-capability>
+Host: 127.0.0.1:<port>
 ```
 
-This maps Codex response references to Copilot SDK session IDs and preserves pending external-tool request IDs. It lets a conversation—and even a tool call waiting for Codex—survive a bridge restart. The file does not contain GitHub credentials, but it can contain tool names and arguments, so treat it as sensitive local conversation state. Set `COPILOT_BRIDGE_STATE_DIR` to relocate both bridge-owned state files.
+The capability is high entropy and rotates every launch. Clients must reread it
+after restart.
 
-## Configure Codex
+## OpenCode
 
-Provider configuration is credential-sensitive, so current Codex versions require it in user-level `~/.codex/config.toml`, not project `.codex/config.toml`:
+Configure the OpenCode OpenAI Responses provider seam with:
 
-```toml
-model = "MODEL_ID_FROM_V1_MODELS"
-model_provider = "github-copilot"
-model_catalog_json = "/ABSOLUTE/PATH/TO/THIS/PROJECT/.copilot-bridge/codex-model-catalog.json"
+- base URL from `connection.json`
+- API key from `capability_file` (sent as the bearer token)
+- a model ID returned by `/v1/models`
+- `store:false`
+- complete message/tool history on each fresh provider turn
 
-[model_providers.github-copilot]
-name = "GitHub Copilot via local Responses bridge"
-base_url = "http://127.0.0.1:4141/v1"
-wire_api = "responses"
-request_max_retries = 1
-stream_max_retries = 1
-stream_idle_timeout_ms = 600000
-```
+Request Copilot-hosted search with `{ "type": "web_search" }`. OpenCode must
+treat returned `web_search_call` items as provider-executed and must not run its
+local search tool for those items.
 
-No OpenAI API key is needed. Start the bridge **before** launching Codex so the catalog exists and is current. Codex loads `model_catalog_json` at startup; restart Codex after the bridge refreshes it. The picker will then contain the models allowed by Copilot policy, with Copilot display names, reasoning levels, image capability, and context limits.
+See:
 
-`model_catalog_json` is authoritative, which prevents Codex's bundled OpenAI-only entries from leaking into this provider's picker. To try the bridge without replacing the normal OpenAI picker permanently, keep these settings in a dedicated user profile file.
+- [OpenCode provider contract](docs/opencode-contract.md)
+- [Security and operations](docs/security.md)
+- [Network matrix](docs/network-matrix.md)
 
-## Security notes
+## Troubleshooting
 
-- Keep the default loopback bind. There is no inbound authentication layer.
-- The SDK credential stays inside GitHub's SDK/runtime; the bridge never scrapes or returns it.
-- Codex tools are registered with the SDK as declaration-only external tools. The bridge persists the SDK request ID, waits for Codex to execute and approve the tool, and completes that same SDK request only after Codex posts a `function_call_output`.
-- When Codex requests its hosted `web_search` tool, the bridge selectively enables only Copilot's built-in `web_search`. Search progress is translated to Responses `web_search_call` items, and deduplicated citation URLs are appended to the answer. Copilot filesystem, shell, editing, memory, and other built-ins remain disabled.
-- A mid-thread model or reasoning-effort change uses the SDK's model-switch operation without discarding history. Changing instructions, tools, or web-search availability reconnects the same SDK session with the new configuration.
-- The SDK compacts long sessions automatically at its configured context thresholds. This replaces `/responses/compact` operationally, but it cannot reproduce OpenAI's encrypted reasoning-item format.
-- Session state is written under `.copilot-bridge/` with owner-only file permissions unless `COPILOT_BRIDGE_STATE_DIR` is set.
+- **401:** reread the capability file after bridge restart.
+- **403 Host/Origin:** use literal `127.0.0.1`, the exact port, and a backend
+  no-Origin request unless an Origin was explicitly allowlisted.
+- **Model unavailable:** verify `gh auth status`, Copilot entitlement, and
+  organization Copilot CLI/SDK policy.
+- **Tool continuation expired:** retry the provider turn; continuations are
+  intentionally in-memory and expire after five minutes.
+- **Paste not expanded:** ensure the file is under the configured paste root,
+  uses the required basename, and passes the checks documented in
+  `docs/security.md`.
 
 ## License
 

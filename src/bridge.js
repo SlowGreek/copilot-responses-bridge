@@ -52,9 +52,11 @@ function systemInstructions(request) {
   ].filter(Boolean).join("\n");
 }
 
-function runtimeEnvironment() {
+export function runtimeEnvironment(source = process.env) {
+  const environment = Object.fromEntries(Object.entries(source).filter(([key]) =>
+    !/(?:OTEL|TELEMETRY|ANALYTICS|APPLICATIONINSIGHTS)/iu.test(key)));
   return {
-    ...process.env,
+    ...environment,
     OTEL_SDK_DISABLED: "true",
     OTEL_TRACES_EXPORTER: "none",
     OTEL_METRICS_EXPORTER: "none",
@@ -62,6 +64,7 @@ function runtimeEnvironment() {
     OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT: "false",
     COPILOT_OTEL_FILE_EXPORTER_PATH: undefined,
     COPILOT_OTEL_EXPORTER_TYPE: undefined,
+    COPILOT_TELEMETRY_DISABLED: "1",
   };
 }
 
@@ -270,6 +273,10 @@ export class CopilotResponsesBridge {
   }
 
   onTurnTerminal(continuation, { hasTools, failed, cancelled }) {
+    void this.audit?.record("provider.terminal", {
+      model: continuation.request.model,
+      status: cancelled ? "cancelled" : failed ? "failed" : hasTools ? "tool_calls" : "completed",
+    });
     continuation.turn = undefined;
     if (hasTools && continuation.pending.size) {
       clearTimeout(continuation.expiration);
@@ -288,12 +295,14 @@ export class CopilotResponsesBridge {
     if (continuation.disposal) return continuation.disposal;
     continuation.disposal = (async () => {
       clearTimeout(continuation.expiration);
+      const hadPending = continuation.pending.size > 0;
       for (const callId of continuation.pending.keys()) {
         if (this.continuations.get(callId) === continuation) this.continuations.delete(callId);
       }
       continuation.pending.clear();
       if (continuation.session) {
         this.sessions.delete(continuation.session);
+        if (hadPending) await continuation.session.abort().catch(() => {});
         await continuation.session.disconnect().catch(() => {});
       }
     })();

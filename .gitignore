@@ -1,4 +1,5 @@
 node_modules/
+dist/
 .copilot-bridge/
 .env
 npm-debug.log*
