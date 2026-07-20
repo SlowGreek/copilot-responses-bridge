@@ -1,13 +1,24 @@
-# Security policy
+# Security Policy
 
-## Reporting a vulnerability
+## Reporting
 
-Please report security vulnerabilities privately through GitHub's **Security** tab by opening a private vulnerability report. Do not open a public issue for an unpatched vulnerability.
+Report vulnerabilities through GitHub's private security-advisory workflow for
+this repository. Do not include capabilities, GitHub tokens, prompts, code,
+tool payloads, filesystem paths, or user identifiers in public issues.
 
-Include the affected version or commit, reproduction steps, impact, and any suggested mitigation. Please do not include live GitHub, Copilot, or model-provider credentials in a report.
+## Current boundary
 
-## Security boundaries
+- The bridge binds only literal IPv4 loopback on a child-selected port.
+- `/v1/models` and `/v1/responses` require a per-launch bearer and instance ID.
+- Clients verify an HMAC challenge and launched-child PID before sending bearer
+  credentials.
+- Host, Origin, request-target, payload, event, output, image, and file limits
+  fail closed.
+- GitHub Copilot SDK memory, hidden infinite sessions, telemetry, embedding
+  persistence, config discovery, and undeclared tools are disabled.
+- The SDK child receives only an explicit environment allowlist and requires
+  `COPILOT_GITHUB_TOKEN` with stored-account fallback disabled.
+- OpenCode remains the sole owner of sessions, permissions, and tool execution.
 
-The bridge is designed for local, single-user use and binds to `127.0.0.1` by default. It does not provide inbound authentication. Do not expose it to a LAN or the public internet without adding an authenticated, encrypted reverse proxy and reviewing the multi-user isolation model.
-
-Each user must authenticate with their own GitHub identity and Copilot entitlement. The project does not support copied credentials or undocumented Copilot inference endpoints.
+Operational details and limits are documented in
+[docs/security.md](docs/security.md).

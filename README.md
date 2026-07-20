@@ -15,8 +15,7 @@ return to the client for authorization and execution.
 
 - Node.js 20.19 or newer.
 - A GitHub identity entitled to Copilot SDK access.
-- Stored Copilot/GitHub CLI authentication, or a per-user
-  `COPILOT_GITHUB_TOKEN` supplied to the bridge process.
+- An explicit per-user `COPILOT_GITHUB_TOKEN` for the intended work identity.
 
 Each user must authenticate with their own identity. The bridge does not share,
 scrape, or bypass Copilot credentials.
@@ -41,6 +40,7 @@ requires a separate explicit allowlist directory.
 ```sh
 export COPILOT_BRIDGE_STATE_DIR=/absolute/private/state
 export COPILOT_BRIDGE_PASTE_DIR=/absolute/private/pastes # optional
+export COPILOT_GITHUB_TOKEN=<intended-work-identity-token>
 export HOST=127.0.0.1
 npm start
 ```

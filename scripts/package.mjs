@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import path from "node:path";
 
-const ROOT_FILES = ["LICENSE", "README.md", "package.json", "package-lock.json"];
+const ROOT_FILES = ["LICENSE", "README.md", "SECURITY.md", "package.json", "package-lock.json"];
 const ROOT_DIRECTORIES = ["docs", "scripts", "src"];
 
 async function filesIn(directory) {

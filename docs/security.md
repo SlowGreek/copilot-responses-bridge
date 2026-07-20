@@ -62,6 +62,11 @@ model, tool/search counts, and aggregate token counts. Prompts, code, tool
 arguments/results, paths, headers, capabilities, provider request IDs, and user
 identifiers are never recorded.
 
+`COPILOT_GITHUB_TOKEN` is mandatory and passed through the SDK's explicit
+`gitHubToken` option with `useLoggedInUser:false`. Stored personal accounts,
+`GH_TOKEN`, `GITHUB_TOKEN`, proxy variables, `NODE_OPTIONS`, `LD_PRELOAD`, and
+other ambient process secrets are not inherited by the SDK child.
+
 The bridge process should run with umask 077. `npm run start:detached` enforces
 private state and log files and waits for an authenticated model-list probe
 before reporting readiness.

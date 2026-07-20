@@ -34,6 +34,9 @@ export async function startServer(environment = process.env) {
   if (directoriesOverlap(stateDirectory, process.cwd())) {
     throw new Error("COPILOT_BRIDGE_STATE_DIR must be outside the worktree");
   }
+  if (!environment.COPILOT_GITHUB_TOKEN) {
+    throw new Error("COPILOT_GITHUB_TOKEN is required; stored account fallback is disabled");
+  }
   const lock = await acquireInstanceLock(stateDirectory);
   const capabilityFile = privatePath(
     stateDirectory,
@@ -73,6 +76,7 @@ export async function startServer(environment = process.env) {
       stateDirectory,
       pasteDirectory,
       audit,
+      githubToken: environment.COPILOT_GITHUB_TOKEN,
     });
     await bridge.refreshModelCatalog(catalogPath);
     await chmod(catalogPath, 0o600);

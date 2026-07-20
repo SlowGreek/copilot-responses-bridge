@@ -33,6 +33,11 @@ X-Copilot-Bridge-Instance: <instance_id>
 Host: 127.0.0.1:<port>
 ```
 
+The OpenCode HTTP transport must preserve both custom headers. A transport that
+drops `Authorization` or `X-Copilot-Bridge-Instance` is intentionally
+incompatible and receives 401; the bridge never falls back to unauthenticated
+requests.
+
 The capability and instance ID rotate at every bridge launch. OpenCode must reread the
 descriptor and capability after a restart. It must never persist the capability
 in project configuration, logs, analytics, or UI state.
@@ -79,6 +84,9 @@ tools. The bridge never runs them. Copilot requests are returned as standard
 Responses function/custom tool-call items; OpenCode authorizes and executes
 them.
 
+The SDK allowlist contains only the exact declared custom tool names. It never
+uses `custom:*`.
+
 The bridge retains only a short-lived, in-memory provider continuation keyed by
 random public call IDs so tool results can complete the same Copilot SDK RPC.
 OpenCode must return every result from a parallel batch together, include the
@@ -121,3 +129,11 @@ must not invoke its local Exa/Parallel search implementation for that item.
   are advisory; model policy remains authoritative.
 
 Responses WebSocket mode and `/responses/compact` are not implemented.
+
+## Canonical transcript boundary
+
+OpenCode system items and provider instructions are placed only in the SDK
+`systemMessage`. Canonical user/assistant/tool/reasoning history is serialized
+as fixed-schema JSON marked `untrusted_conversation_data` inside the SDK user
+prompt. Role-like strings inside user, tool, pasted, or web content remain JSON
+string values and cannot become system-message delimiters.

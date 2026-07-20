@@ -21,17 +21,9 @@ const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_CONTINUATION_TTL_MS = 5 * 60 * 1000;
 const MAX_TOOL_ARGUMENT_BYTES = 1024 * 1024;
 const CHILD_ENVIRONMENT = new Set([
-  "ALL_PROXY",
   "COMSPEC",
-  "COPILOT_GITHUB_TOKEN",
-  "GITHUB_TOKEN",
-  "GH_TOKEN",
   "HOME",
-  "HTTP_PROXY",
-  "HTTPS_PROXY",
   "LANG",
-  "NODE_EXTRA_CA_CERTS",
-  "NO_PROXY",
   "PATH",
   "PATHEXT",
   "SHELL",
@@ -68,10 +60,14 @@ function toolChoiceInstruction(request) {
 }
 
 function systemInstructions(request) {
+  const canonicalSystem = request.input
+    .filter((item) => item.role === "system")
+    .map((item) => item.content);
   return [
-    request.instructions || "You are a helpful assistant.",
     "The host application owns all tools, permissions, sessions, and workflow state.",
     "Declared custom tools are external: request them when needed and never claim to have executed them yourself.",
+    request.instructions || "You are a helpful assistant.",
+    ...canonicalSystem,
     toolChoiceInstruction(request),
     structuredOutputInstruction(request.text?.format),
   ].filter(Boolean).join("\n");
@@ -106,6 +102,7 @@ export class CopilotResponsesBridge {
     stateDirectory,
     pasteDirectory,
     audit,
+    githubToken,
   } = {}) {
     if (!client && (!stateDirectory || !path.isAbsolute(stateDirectory))) {
       throw new Error("an absolute stateDirectory is required for the Copilot runtime");
@@ -115,11 +112,17 @@ export class CopilotResponsesBridge {
       ?? process.env.COPILOT_BRIDGE_STATE_DIR
       ?? ".copilot-bridge",
     );
+    const intendedGitHubToken = githubToken ?? process.env.COPILOT_GITHUB_TOKEN;
+    if (!client && !intendedGitHubToken) {
+      throw new Error("COPILOT_GITHUB_TOKEN is required; stored account fallback is disabled");
+    }
     this.client = client ?? new CopilotClient({
       mode: "empty",
       logLevel: "none",
       baseDirectory,
       env: runtimeEnvironment(),
+      gitHubToken: intendedGitHubToken,
+      useLoggedInUser: false,
       connection: RuntimeConnection.forStdio({ path: COPILOT_CLI_PATH }),
     });
     this.baseDirectory = baseDirectory;
@@ -166,7 +169,7 @@ export class CopilotResponsesBridge {
     }));
     const webSearchEnabled = requestUsesWebSearch(request.tools) && request.tool_choice !== "none";
     const availableTools = new ToolSet();
-    if (tools.length) availableTools.addCustom("*");
+    for (const tool of tools) availableTools.addCustom(tool.name);
     if (webSearchEnabled) availableTools.addBuiltIn("web_search");
     return {
       clientName: "opencode-copilot-responses-bridge",
