@@ -103,6 +103,13 @@ which starts a fresh provider turn; removed tools cannot be requested again.
 `parallel_tool_calls:false` is advisory. A Copilot-emitted batch is still
 returned intact; OpenCode remains responsible for execution policy.
 
+Tool choice is enforced at the terminal boundary, not trusted as prompt
+guidance. `required` fails if neither an external nor provider-hosted tool was
+emitted. A specific function choice fails if no call was emitted or if any
+other tool was emitted. `none` fails on any tool event. Violations terminate as
+`tool_choice_violation`; plain text cannot satisfy OpenCode's required
+`StructuredOutput` stage.
+
 ## Provider-hosted web search
 
 OpenCode requests Copilot-hosted search with:

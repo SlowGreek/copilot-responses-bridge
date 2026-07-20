@@ -92,6 +92,7 @@ export class ResponsesTurn {
     this.reasoning = new Map();
     this.searches = [];
     this.toolCalls = [];
+    this.observedTools = [];
     this.toolFlush = undefined;
     this.usage = undefined;
     this.resolveDone = undefined;
@@ -280,6 +281,7 @@ export class ResponsesTurn {
     if (this.closed) return;
     let search = this.searches.at(-1);
     if (!search || search.completed) {
+      this.observedTools.push("web_search");
       search = {
         id: itemId("ws"),
         outputIndex: this.allocateOutput(),
@@ -375,6 +377,7 @@ export class ResponsesTurn {
 
   queueTool(call) {
     if (this.closed) return;
+    this.observedTools.push(call.name);
     this.toolCalls.push(call);
     clearTimeout(this.toolFlush);
     this.toolFlush = setTimeout(() => this.finishWithTools(), 25);
@@ -437,9 +440,40 @@ export class ResponsesTurn {
     this.usage = mergeUsage(this.usage, normalizeUsage(data));
   }
 
+  enforceToolChoice() {
+    const choice = this.request.tool_choice ?? "auto";
+    if (choice === "auto") return;
+    if (choice === "none") {
+      if (this.observedTools.length) {
+        throw new BridgeRequestError("provider emitted a tool while tool_choice was none", {
+          statusCode: 502,
+          code: "tool_choice_violation",
+        });
+      }
+      return;
+    }
+    if (choice === "required") {
+      if (!this.observedTools.length) {
+        throw new BridgeRequestError("provider emitted no tool while tool_choice was required", {
+          statusCode: 502,
+          code: "tool_choice_violation",
+        });
+      }
+      return;
+    }
+    const mismatched = this.observedTools.filter((name) => name !== choice.name);
+    if (!this.observedTools.length || mismatched.length) {
+      throw new BridgeRequestError("provider did not honor the specific tool_choice", {
+        statusCode: 502,
+        code: "tool_choice_violation",
+      });
+    }
+  }
+
   finishWithTools() {
     if (this.closed) return;
     try {
+      this.enforceToolChoice();
       this.finishReasoning();
       this.finishSearches();
       this.emitText("commentary");
@@ -453,6 +487,7 @@ export class ResponsesTurn {
   finishText(content) {
     if (this.closed) return;
     try {
+      this.enforceToolChoice();
       if (!this.text && content) this.delta(content);
       else if (content?.startsWith(this.text) && content.length > this.text.length) {
         this.delta(content.slice(this.text.length));

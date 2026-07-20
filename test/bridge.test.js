@@ -699,6 +699,93 @@ test("honors tool_choice none by exposing no external or hosted tools", async ()
   assert.equal(client.sessions[0].config.enableCitations, false);
 });
 
+test("fails closed when required tool choice produces plain text only", async () => {
+  const response = new FakeResponse();
+  await newBridge(new FakeClient()).handle(baseRequest({
+    tool_choice: "required",
+    tools: [],
+  }), response);
+  const terminal = sseEvents(response).at(-1);
+  assert.equal(terminal.type, "response.failed");
+  assert.equal(terminal.response.error.code, "tool_choice_violation");
+  assert.doesNotMatch(response.data, /response\.completed/u);
+});
+
+test("counts provider-hosted web search toward required tool choice", async () => {
+  const response = new FakeResponse();
+  await newBridge(new FakeClient()).handle(baseRequest({
+    tool_choice: "required",
+    tools: [{ type: "web_search" }],
+  }), response);
+  const events = sseEvents(response);
+  assert.ok(events.some((event) =>
+    event.type === "response.output_item.done" && event.item.type === "web_search_call"));
+  assert.equal(events.at(-1).type, "response.completed");
+});
+
+test("enforces a specific StructuredOutput tool choice", async () => {
+  const response = new FakeResponse();
+  await newBridge(new FakeClient()).handle(baseRequest({
+    tool_choice: { type: "function", name: "StructuredOutput" },
+    tools: [{
+      type: "function",
+      name: "StructuredOutput",
+      description: "Return structured output",
+      parameters: {
+        type: "object",
+        properties: { answer: { type: "string" } },
+        required: ["answer"],
+      },
+    }],
+  }), response);
+  const events = sseEvents(response);
+  const call = events.find((event) =>
+    event.type === "response.output_item.done" && event.item.type === "function_call");
+  assert.equal(call.item.name, "StructuredOutput");
+  assert.equal(events.at(-1).type, "response.completed");
+});
+
+test("fails a specific tool choice if any other tool is emitted", async () => {
+  const client = new FakeClient([{
+    toolCalls: [
+      {
+        requestId: "request_1",
+        toolCallId: "call_1",
+        toolName: "StructuredOutput",
+        arguments: { answer: "yes" },
+      },
+      {
+        requestId: "request_2",
+        toolCallId: "call_2",
+        toolName: "other",
+        arguments: {},
+      },
+    ],
+  }]);
+  const response = new FakeResponse();
+  await newBridge(client).handle(baseRequest({
+    tool_choice: { type: "function", name: "StructuredOutput" },
+    tools: [
+      {
+        type: "function",
+        name: "StructuredOutput",
+        description: "Return structured output",
+        parameters: { type: "object" },
+      },
+      {
+        type: "function",
+        name: "other",
+        description: "Other",
+        parameters: { type: "object" },
+      },
+    ],
+  }), response);
+  const terminal = sseEvents(response).at(-1);
+  assert.equal(terminal.type, "response.failed");
+  assert.equal(terminal.response.error.code, "tool_choice_violation");
+  assert.equal(client.sessions[0].aborted, true);
+});
+
 test("sends allowlisted pasted text and images to Copilot", async () => {
   const directory = await mkdtemp(path.join(await realpath(tmpdir()), "bridge-paste-"));
   try {
