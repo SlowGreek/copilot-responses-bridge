@@ -16,3 +16,14 @@ test("startup rejects every non-literal-loopback bind before creating state", as
     /literal loopback/,
   );
 });
+
+test("startup requires an absolute external state directory", async () => {
+  await assert.rejects(
+    startServer({ HOST: "127.0.0.1", PORT: "0" }),
+    /absolute directory outside the worktree/,
+  );
+  await assert.rejects(
+    startServer({ HOST: "127.0.0.1", PORT: "0", COPILOT_BRIDGE_STATE_DIR: ".bridge" }),
+    /absolute directory outside the worktree/,
+  );
+});

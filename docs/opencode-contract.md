@@ -12,24 +12,34 @@ The bridge writes a private `connection.json` into
 ```json
 {
   "version": 1,
-  "base_url": "http://127.0.0.1:4141/v1",
+  "base_url": "http://127.0.0.1:53127/v1",
+  "instance_id": "per-launch-random-id",
+  "pid": 12345,
   "capability_file": "/private/runtime/path/client-capability",
   "model_catalog_json": "/private/runtime/path/codex-model-catalog.json",
   "paste_directory": null
 }
 ```
 
-OpenCode reads `base_url`, then reads the capability file and configures its
-OpenAI Responses provider with that value as the API key. The provider sends:
+The port is child-chosen by default. OpenCode must verify `pid` is the child it
+launched, read the capability, create a fresh 256-bit challenge, and POST only
+that challenge to `/challenge`. It verifies the returned
+`HMAC-SHA256(capability, challenge)` and exact `instance_id` before configuring
+the OpenAI Responses provider. The provider then sends:
 
 ```text
 Authorization: Bearer <capability-file contents>
+X-Copilot-Bridge-Instance: <instance_id>
 Host: 127.0.0.1:<port>
 ```
 
-The capability rotates at every bridge launch. OpenCode must reread the
+The capability and instance ID rotate at every bridge launch. OpenCode must reread the
 descriptor and capability after a restart. It must never persist the capability
 in project configuration, logs, analytics, or UI state.
+
+A client must never send the bearer to a port before challenge verification.
+This rejects a fake server pre-bound to a guessed fixed port without disclosing
+the reusable bearer.
 
 ## Models
 
@@ -57,8 +67,10 @@ Cancellation is the HTTP connection closing. OpenCode should retry HTTP 429,
 502, 503, and 504 failures according to its provider policy; malformed requests
 are 4xx and should not be retried unchanged.
 
-`prompt_cache_key` is accepted as an opaque provider cache hint. It is never
-used as a thread or session identifier.
+OpenCode should set `prompt_cache_key` to its canonical session key. The bridge
+does not use it to recover or reuse hidden SDK history; complete submitted
+history remains authoritative. It does bind an in-flight tool continuation to
+that key so another fork/session cannot settle its pending provider call.
 
 ## External tools
 

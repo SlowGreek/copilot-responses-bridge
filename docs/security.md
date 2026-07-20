@@ -8,9 +8,13 @@
 - No-Origin backend/CLI requests are accepted. An Origin, when present, must be
   the exact loopback bridge origin or an exact configured allowlist entry.
 - Every `/v1/*` route requires the per-launch bearer capability.
+- Every `/v1/*` route also requires the per-launch instance ID.
 - `/healthz` is unauthenticated and returns only `{"ok":true}`.
+- `/challenge` accepts only a fresh 256-bit nonce and returns an HMAC proof;
+  the client verifies it before disclosing the bearer.
 
-The state directory is mode 0700. Bridge-owned capability, connection, catalog,
+The state directory must be absolute and outside the worktree and is mode 0700.
+Bridge-owned capability, connection, catalog,
 audit, lock, and launcher log files are mode 0600. A single-instance lock is
 acquired before capability rotation, preventing a failed second launch from
 invalidating a live client.
@@ -24,7 +28,15 @@ an inherited per-launch environment only.
 
 Never pass the capability in a URL, query string, project file, command-line
 argument, analytics event, or log. OpenCode should read the capability file
-only after `connection.json` is refreshed.
+only after `connection.json` is refreshed, verify the descriptor PID belongs to
+its launched child, and complete `/challenge` before sending the bearer.
+
+The bridge chooses an unused child port by default. Fixed ports are supported
+only for supervisors that reserve them safely; challenge verification remains
+mandatory.
+
+Graceful shutdown removes `connection.json` and `client-capability`. Startup
+clears stale copies only after acquiring the private single-instance lock.
 
 ## Pasted text
 
@@ -40,9 +52,12 @@ never read.
 
 ## Privacy and auditing
 
-Copilot SDK config discovery, custom instructions, session telemetry,
-OpenTelemetry exporters, canvases, extensions, and infinite sessions are
-disabled. Audit records use a fixed metadata allowlist: route/status/duration,
+The exact reviewed Copilot SDK 1.0.2 is pinned. Copilot memory, infinite
+sessions, embedding retrieval/persistence, config discovery, custom
+instructions, session telemetry,
+OpenTelemetry exporters, canvases, and extensions are
+disabled. The SDK child receives an environment allowlist rather than ambient
+process secrets. Audit records use a fixed metadata allowlist: route/status/duration,
 model, tool/search counts, and aggregate token counts. Prompts, code, tool
 arguments/results, paths, headers, capabilities, provider request IDs, and user
 identifiers are never recorded.

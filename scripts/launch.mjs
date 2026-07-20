@@ -3,6 +3,7 @@ import { open, readFile, stat } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import http from "node:http";
 import path from "node:path";
+import { verifyBridgeConnection } from "../src/client-auth.js";
 import { secureDirectory } from "../src/security.js";
 
 const stateDirectoryValue = process.env.COPILOT_BRIDGE_STATE_DIR;
@@ -33,6 +34,12 @@ await stdout.close();
 await stderr.close();
 
 async function probe(connection, capability) {
+  if (connection.pid !== child.pid) throw new Error("bridge descriptor PID mismatch");
+  const authentication = await verifyBridgeConnection({
+    baseUrl: connection.base_url,
+    capability,
+    instanceId: connection.instance_id,
+  });
   const url = new URL(`${connection.base_url}/models`);
   return new Promise((resolve, reject) => {
     const request = http.get({
@@ -40,7 +47,7 @@ async function probe(connection, capability) {
       port: url.port,
       path: url.pathname,
       headers: {
-        authorization: `Bearer ${capability}`,
+        ...authentication,
         host: url.host,
       },
       timeout: 1_000,

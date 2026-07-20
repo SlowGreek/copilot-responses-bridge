@@ -1,6 +1,6 @@
 import http from "node:http";
 import { TextDecoder } from "node:util";
-import { authorizeBearer, validateLoopbackRequest } from "./security.js";
+import { authorizeBearer, challengeProof, validateLoopbackRequest } from "./security.js";
 import { BridgeRequestError } from "./validation.js";
 
 const DEFAULT_MAX_BODY_BYTES = 8 * 1024 * 1024;
@@ -101,11 +101,12 @@ function modelObject(model) {
 export function createBridgeHttpServer({
   bridge,
   capability,
+  instanceId,
   allowedOrigins = [],
   audit,
   maxBodyBytes = DEFAULT_MAX_BODY_BYTES,
 } = {}) {
-  if (!bridge || !capability) throw new Error("bridge and capability are required");
+  if (!bridge || !capability || !instanceId) throw new Error("bridge, capability, and instanceId are required");
   const server = http.createServer(async (request, response) => {
     const started = Date.now();
     let route = "unknown";
@@ -118,7 +119,27 @@ export function createBridgeHttpServer({
         route = "health";
         return json(response, 200, { ok: true });
       }
+      if (request.method === "POST" && url.pathname === "/challenge") {
+        route = "challenge";
+        const challengeRequest = await readJsonBody(request, 4096);
+        const challenge = challengeRequest?.challenge;
+        if (typeof challenge !== "string"
+            || !/^[A-Za-z0-9_-]+$/u.test(challenge)
+            || Buffer.from(challenge, "base64url").length !== 32) {
+          throw new BridgeRequestError("invalid challenge", { code: "invalid_challenge" });
+        }
+        return json(response, 200, {
+          instance_id: instanceId,
+          proof: challengeProof(capability, challenge),
+        });
+      }
       if (url.pathname.startsWith("/v1/")) {
+        if (request.headers["x-copilot-bridge-instance"] !== instanceId) {
+          throw new BridgeRequestError("instance challenge required", {
+            statusCode: 401,
+            code: "instance_challenge_required",
+          });
+        }
         if (!authorizeBearer(request.headers.authorization, capability)) {
           throw new BridgeRequestError("authentication required", {
             statusCode: 401,

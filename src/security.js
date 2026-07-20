@@ -1,6 +1,6 @@
 import { constants } from "node:fs";
 import { chmod, lstat, mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import { BridgeRequestError } from "./validation.js";
 
@@ -159,6 +159,10 @@ export function authorizeBearer(header, capability) {
 
 export function capabilityTag(capability) {
   return createHash("sha256").update(capability).digest("hex").slice(0, 16);
+}
+
+export function challengeProof(capability, challenge) {
+  return createHmac("sha256", capability).update(challenge).digest("base64url");
 }
 
 export async function validatePasteDirectory(directory) {

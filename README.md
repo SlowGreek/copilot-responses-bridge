@@ -13,7 +13,7 @@ return to the client for authorization and execution.
 
 ## Prerequisites
 
-- Node.js 20 or newer.
+- Node.js 20.19 or newer.
 - A GitHub identity entitled to Copilot SDK access.
 - Stored Copilot/GitHub CLI authentication, or a per-user
   `COPILOT_GITHUB_TOKEN` supplied to the bridge process.
@@ -42,7 +42,6 @@ requires a separate explicit allowlist directory.
 export COPILOT_BRIDGE_STATE_DIR=/absolute/private/state
 export COPILOT_BRIDGE_PASTE_DIR=/absolute/private/pastes # optional
 export HOST=127.0.0.1
-export PORT=4141
 npm start
 ```
 
@@ -52,26 +51,35 @@ Detached launch:
 COPILOT_BRIDGE_STATE_DIR=/absolute/private/state npm run start:detached
 ```
 
-The server refuses non-loopback binds. After startup, read
+The bridge chooses an unused loopback port by default, avoiding OpenCode's own
+local services. Set `PORT` only when a supervisor has safely reserved a fixed
+port. The server refuses non-loopback binds and requires the state directory to
+be absolute and outside the worktree. After startup, read
 `$COPILOT_BRIDGE_STATE_DIR/connection.json`; it identifies the base URL,
-rotated capability file, model catalog, and optional paste directory without
-putting a secret on the command line.
+instance ID/PID, rotated capability file, model catalog, and optional paste
+directory without putting a secret on the command line.
 
 ## HTTP surface
 
 - `GET /healthz` — unauthenticated, metadata-free health.
+- `POST /challenge` — unauthenticated challenge-response proof; never receives
+  the bearer capability.
 - `GET /v1/models` — authenticated enabled-model catalog.
 - `POST /v1/responses` — authenticated streaming or nonstreaming Responses.
 
-All `/v1/*` requests require:
+Before sending a bearer token, the client posts a fresh 256-bit challenge to
+`/challenge` and verifies the returned HMAC proof and `instance_id` from
+`connection.json`. Only then may it send `/v1/*` requests with:
 
 ```text
 Authorization: Bearer <contents of client-capability>
+X-Copilot-Bridge-Instance: <instance_id from connection.json>
 Host: 127.0.0.1:<port>
 ```
 
 The capability is high entropy and rotates every launch. Clients must reread it
-after restart.
+after restart. This prevents a fake process pre-bound to a guessed port from
+receiving a reusable bearer before proving it is the launched child.
 
 ## OpenCode
 

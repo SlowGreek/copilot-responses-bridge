@@ -205,6 +205,7 @@ export function validateResponsesRequest(value, { allowedModels } = {}) {
   }
   validateInput(value.input);
   boundedString(value.instructions, "instructions", { optional: true });
+  boundedString(value.prompt_cache_key, "prompt_cache_key", { optional: true });
   if (value.stream !== undefined && typeof value.stream !== "boolean") invalid("stream must be boolean");
   if (value.store === true) invalid("store=true is unsupported; OpenCode must send complete turn history");
   if (value.previous_response_id !== undefined) {

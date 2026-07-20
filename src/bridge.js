@@ -20,6 +20,31 @@ import {
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_CONTINUATION_TTL_MS = 5 * 60 * 1000;
 const MAX_TOOL_ARGUMENT_BYTES = 1024 * 1024;
+const CHILD_ENVIRONMENT = new Set([
+  "ALL_PROXY",
+  "COMSPEC",
+  "COPILOT_GITHUB_TOKEN",
+  "GITHUB_TOKEN",
+  "GH_TOKEN",
+  "HOME",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "LANG",
+  "NODE_EXTRA_CA_CERTS",
+  "NO_PROXY",
+  "PATH",
+  "PATHEXT",
+  "SHELL",
+  "SSL_CERT_DIR",
+  "SSL_CERT_FILE",
+  "SystemRoot",
+  "TEMP",
+  "TMP",
+  "TMPDIR",
+  "USERPROFILE",
+  "WINDIR",
+  "XDG_CONFIG_HOME",
+]);
 
 export const COPILOT_CLI_PATH = fileURLToPath(import.meta.resolve("@github/copilot/npm-loader.js"));
 
@@ -54,7 +79,7 @@ function systemInstructions(request) {
 
 export function runtimeEnvironment(source = process.env) {
   const environment = Object.fromEntries(Object.entries(source).filter(([key]) =>
-    !/(?:OTEL|TELEMETRY|ANALYTICS|APPLICATIONINSIGHTS)/iu.test(key)));
+    CHILD_ENVIRONMENT.has(key) || key.startsWith("LC_")));
   return {
     ...environment,
     OTEL_SDK_DISABLED: "true",
@@ -82,6 +107,9 @@ export class CopilotResponsesBridge {
     pasteDirectory,
     audit,
   } = {}) {
+    if (!client && (!stateDirectory || !path.isAbsolute(stateDirectory))) {
+      throw new Error("an absolute stateDirectory is required for the Copilot runtime");
+    }
     const baseDirectory = path.resolve(
       stateDirectory
       ?? process.env.COPILOT_BRIDGE_STATE_DIR
@@ -148,12 +176,16 @@ export class CopilotResponsesBridge {
       streaming: true,
       systemMessage: { mode: "replace", content: systemInstructions(request) },
       infiniteSessions: { enabled: false },
+      memory: { enabled: false },
       availableTools: availableTools.toArray(),
       tools,
       enableCitations: webSearchEnabled,
       enableSessionTelemetry: false,
       enableConfigDiscovery: false,
       skipCustomInstructions: true,
+      skipEmbeddingRetrieval: true,
+      embeddingCacheStorage: "in-memory",
+      mcpOAuthTokenStorage: "in-memory",
       requestCanvasRenderer: false,
       requestExtensions: false,
       onPermissionRequest: webSearchEnabled
@@ -328,6 +360,12 @@ export class CopilotResponsesBridge {
       throw new BridgeRequestError("tool results must use the original provider model", {
         statusCode: 409,
         code: "provider_continuation_model_mismatch",
+      });
+    }
+    if (request.prompt_cache_key !== continuation.request.prompt_cache_key) {
+      throw new BridgeRequestError("tool results must use the original OpenCode session key", {
+        statusCode: 409,
+        code: "provider_continuation_session_mismatch",
       });
     }
     const supplied = new Map(outputs.map((output) => [output.callId, output]));

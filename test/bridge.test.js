@@ -222,11 +222,13 @@ test("scrubs telemetry exporters from the Copilot runtime environment", () => {
     OTEL_EXPORTER_OTLP_ENDPOINT: "https://collector.example",
     COPILOT_OTEL_FILE_EXPORTER_PATH: "/private/trace.jsonl",
     APPLICATIONINSIGHTS_CONNECTION_STRING: "secret",
+    DATABASE_PASSWORD: "ambient secret",
   });
   assert.equal(environment.PATH, "/bin");
   assert.equal(environment.OTEL_SDK_DISABLED, "true");
   assert.equal(environment.OTEL_EXPORTER_OTLP_ENDPOINT, undefined);
   assert.equal(environment.APPLICATIONINSIGHTS_CONNECTION_STRING, undefined);
+  assert.equal(environment.DATABASE_PASSWORD, undefined);
   assert.equal(environment.COPILOT_TELEMETRY_DISABLED, "1");
 });
 
@@ -261,6 +263,11 @@ test("streams an OpenCode-shaped text response with exact lifecycle and usage", 
   assert.equal(client.sessions[0].config.reasoningEffort, "high");
   assert.equal(client.sessions[0].config.reasoningSummary, "concise");
   assert.equal(client.sessions[0].config.enableSessionTelemetry, false);
+  assert.deepEqual(client.sessions[0].config.memory, { enabled: false });
+  assert.equal(client.sessions[0].config.infiniteSessions.enabled, false);
+  assert.equal(client.sessions[0].config.skipEmbeddingRetrieval, true);
+  assert.equal(client.sessions[0].config.embeddingCacheStorage, "in-memory");
+  assert.equal(client.sessions[0].config.mcpOAuthTokenStorage, "in-memory");
 });
 
 test("returns a standard nonstreaming Responses object", async () => {
@@ -294,6 +301,36 @@ test("lowers complete OpenCode history into each fresh provider turn without thr
   assert.match(client.sessions[1].messages[0].prompt, /\[user\]\nsecond question/);
   assert.equal(client.sessions[0].disconnected, true);
   assert.equal(client.sessions[1].config.model, "other-model");
+});
+
+test("keeps fork and revert histories isolated even when provider metadata overlaps", async () => {
+  const client = new FakeClient([{ text: "root" }, { text: "fork" }, { text: "revert" }]);
+  const bridge = newBridge(client);
+  await bridge.handle(baseRequest({
+    prompt_cache_key: "root-session",
+    input: [
+      { role: "user", content: [{ type: "input_text", text: "root question" }] },
+      { role: "assistant", content: [{ type: "output_text", text: "root answer" }] },
+      { role: "user", content: [{ type: "input_text", text: "root continuation" }] },
+    ],
+  }), new FakeResponse());
+  await bridge.handle(baseRequest({
+    prompt_cache_key: "fork-session",
+    input: [
+      { role: "user", content: [{ type: "input_text", text: "root question" }] },
+      { role: "assistant", content: [{ type: "output_text", text: "root answer" }] },
+      { role: "user", content: [{ type: "input_text", text: "fork-only continuation" }] },
+    ],
+  }), new FakeResponse());
+  await bridge.handle(baseRequest({
+    prompt_cache_key: "root-session",
+    input: [{ role: "user", content: [{ type: "input_text", text: "root question after revert" }] }],
+  }), new FakeResponse());
+  assert.equal(client.sessions.length, 3);
+  assert.doesNotMatch(client.sessions[0].messages[0].prompt, /fork-only/);
+  assert.match(client.sessions[1].messages[0].prompt, /fork-only continuation/);
+  assert.doesNotMatch(client.sessions[2].messages[0].prompt, /root answer|root continuation|fork-only/);
+  assert.match(client.sessions[2].messages[0].prompt, /root question after revert/);
 });
 
 test("returns external tool calls to OpenCode and round-trips all results", async () => {
@@ -410,6 +447,22 @@ test("binds tool continuations to matching history and model", async () => {
     }), new FakeResponse()),
     (error) => error.code === "provider_continuation_model_mismatch",
   );
+  await assert.rejects(
+    bridge.handle(baseRequest({
+      prompt_cache_key: "different-session",
+      input: [
+        {
+          type: "function_call",
+          call_id: call.call_id,
+          name: call.name,
+          arguments: call.arguments,
+        },
+        { type: "function_call_output", call_id: call.call_id, output: "result" },
+      ],
+      tools: [{ type: "function", name: "lookup", description: "Lookup", parameters: { type: "object" } }],
+    }), new FakeResponse()),
+    (error) => error.code === "provider_continuation_session_mismatch",
+  );
   await bridge.stop();
 });
 
@@ -482,6 +535,20 @@ test("preserves custom tool behavior while explicitly overriding SDK built-ins",
   const call = sseEvents(response).find((event) =>
     event.type === "response.output_item.done" && event.item.type === "custom_tool_call");
   assert.equal(call.item.input, "*** Begin Patch\n*** End Patch");
+});
+
+test("honors tool_choice none by exposing no external or hosted tools", async () => {
+  const client = new FakeClient();
+  await newBridge(client).handle(baseRequest({
+    tool_choice: "none",
+    tools: [
+      { type: "function", name: "lookup", description: "Lookup", parameters: { type: "object" } },
+      { type: "web_search" },
+    ],
+  }), new FakeResponse());
+  assert.deepEqual(client.sessions[0].config.tools, []);
+  assert.deepEqual(client.sessions[0].config.availableTools, []);
+  assert.equal(client.sessions[0].config.enableCitations, false);
 });
 
 test("sends allowlisted pasted text and images to Copilot", async () => {
