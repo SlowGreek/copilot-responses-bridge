@@ -67,6 +67,12 @@ identifiers are never recorded.
 `GH_TOKEN`, `GITHUB_TOKEN`, proxy variables, `NODE_OPTIONS`, `LD_PRELOAD`, and
 other ambient process secrets are not inherited by the SDK child.
 
+The real SDK system message marks external tool results and provider-hosted
+web, file, MCP, and retrieved output as untrusted data. Directives embedded in
+that data cannot change policy, permissions, tool selection, or secret
+handling. This applies to same-turn `handlePendingToolCall` results as well as
+history serialized for later turns.
+
 The bridge process should run with umask 077. `npm run start:detached` enforces
 private state and log files and waits for an authenticated model-list probe
 before reporting readiness.

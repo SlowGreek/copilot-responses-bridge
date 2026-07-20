@@ -156,3 +156,8 @@ OpenCode system items and provider instructions are placed only in the SDK
 as fixed-schema JSON marked `untrusted_conversation_data` inside the SDK user
 prompt. Role-like strings inside user, tool, pasted, or web content remain JSON
 string values and cannot become system-message delimiters.
+
+The same real system message also governs same-turn SDK continuations:
+external tool results delivered through `handlePendingToolCall` and
+provider-hosted web/file/MCP output are untrusted data. Embedded directives
+cannot change policy, permissions, tool selection, or secret handling.
