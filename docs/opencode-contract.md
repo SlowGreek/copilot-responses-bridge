@@ -100,6 +100,13 @@ change while a tool is running, the bridge aborts the stale SDK session and
 returns 409. OpenCode retries the same complete history under the new config,
 which starts a fresh provider turn; removed tools cannot be requested again.
 
+The exact initial canonical input array is separately hashed and length-bound.
+A continuation must preserve that prefix byte-semantically after canonical key
+ordering; its suffix may contain only the emitted pending call items and their
+results. Rewind, fork, edit, reorder, removal, or extra conversation content
+aborts the stale SDK session with 409, after which OpenCode retries the complete
+reverted/forked history as a fresh provider turn.
+
 `parallel_tool_calls:false` is enforced at the terminal boundary. More than one
 external/provider-hosted call fails with `parallel_tool_calls_violation` before
 any tool-call item is completed, so Copilot cannot force concurrency the host
