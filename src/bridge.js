@@ -1,4 +1,5 @@
 import { CopilotClient, RuntimeConnection, ToolSet } from "@github/copilot-sdk";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { writeCodexCatalog } from "./catalog.js";
@@ -92,6 +93,35 @@ export function runtimeEnvironment(source = process.env) {
 function externalToolConfig(request) {
   if (request.tool_choice === "none") return [];
   return normalizeTools(request.tools);
+}
+
+function canonicalValue(value) {
+  if (Array.isArray(value)) return value.map(canonicalValue);
+  if (!isPlainObject(value)) return value;
+  return Object.fromEntries(Object.keys(value)
+    .filter((key) => value[key] !== undefined)
+    .sort()
+    .map((key) => [key, canonicalValue(value[key])]));
+}
+
+export function providerConfigurationHash(request) {
+  const configuration = {
+    instructions: request.instructions,
+    system: request.input
+      .filter((item) => item.role === "system")
+      .map((item) => item.content),
+    tools: request.tools,
+    tool_choice: request.tool_choice,
+    reasoning: request.reasoning,
+    text: request.text,
+    parallel_tool_calls: request.parallel_tool_calls,
+    max_output_tokens: request.max_output_tokens,
+    temperature: request.temperature,
+    top_p: request.top_p,
+  };
+  return createHash("sha256")
+    .update(JSON.stringify(canonicalValue(configuration)))
+    .digest("hex");
 }
 
 export class CopilotResponsesBridge {
@@ -202,6 +232,7 @@ export class CopilotResponsesBridge {
   createContinuation(request) {
     return {
       request,
+      configurationHash: providerConfigurationHash(request),
       session: undefined,
       turn: undefined,
       pending: new Map(),
@@ -383,6 +414,13 @@ export class CopilotResponsesBridge {
           code: "provider_continuation_history_mismatch",
         });
       }
+    }
+    if (providerConfigurationHash(request) !== continuation.configurationHash) {
+      await this.disposeContinuation(continuation);
+      throw new BridgeRequestError("provider configuration changed during tool execution; retry the canonical turn", {
+        statusCode: 409,
+        code: "provider_continuation_configuration_mismatch",
+      });
     }
     const missing = [...continuation.pending.keys()].filter((callId) => !supplied.has(callId));
     if (missing.length) {

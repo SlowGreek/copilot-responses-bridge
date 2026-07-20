@@ -93,6 +93,13 @@ OpenCode must return every result from a parallel batch together, include the
 matching emitted call items in history, and use the original model. Continuation
 state expires after five minutes and is never persisted across bridge restarts.
 
+The continuation is also bound to a canonical hash of OpenCode system
+instructions, tools/schemas, tool choice, reasoning, structured-output and
+generation controls, and parallel policy. If permissions or configuration
+change while a tool is running, the bridge aborts the stale SDK session and
+returns 409. OpenCode retries the same complete history under the new config,
+which starts a fresh provider turn; removed tools cannot be requested again.
+
 `parallel_tool_calls:false` is advisory. A Copilot-emitted batch is still
 returned intact; OpenCode remains responsible for execution policy.
 

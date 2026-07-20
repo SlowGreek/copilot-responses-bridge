@@ -433,6 +433,7 @@ test("returns external tool calls to OpenCode and round-trips all results", asyn
 
   const second = new FakeResponse();
   await bridge.handle(baseRequest({
+    parallel_tool_calls: false,
     input: [
       { role: "user", content: [{ type: "input_text", text: "weather and time" }] },
       ...calls.map((call) => ({
@@ -453,8 +454,18 @@ test("returns external tool calls to OpenCode and round-trips all results", asyn
       },
     ],
     tools: [
-      { type: "function", name: "get_weather", description: "Weather", parameters: { type: "object" } },
-      { type: "function", name: "get_time", description: "Time", parameters: { type: "object" } },
+      {
+        type: "function",
+        name: "get_weather",
+        description: "Weather",
+        parameters: { type: "object", properties: { city: { type: "string" } } },
+      },
+      {
+        type: "function",
+        name: "get_time",
+        description: "Time",
+        parameters: { type: "object", properties: { zone: { type: "string" } } },
+      },
     ],
   }), second);
   assert.deepEqual(client.sessions[0].handledTools, [
@@ -514,6 +525,88 @@ test("binds tool continuations to matching history and model", async () => {
     }), new FakeResponse()),
     (error) => error.code === "provider_continuation_session_mismatch",
   );
+  await bridge.stop();
+});
+
+test("aborts a pending continuation when tool_choice becomes none and retries fresh", async () => {
+  const client = new FakeClient([{}, { text: "reconfigured safely" }]);
+  const bridge = newBridge(client);
+  const tools = [{
+    type: "function",
+    name: "lookup",
+    description: "Lookup",
+    parameters: { type: "object" },
+  }];
+  const first = new FakeResponse();
+  await bridge.handle(baseRequest({
+    prompt_cache_key: "permission-session",
+    tools,
+    tool_choice: "auto",
+    reasoning: { effort: "high" },
+  }), first);
+  const call = sseEvents(first).find((event) =>
+    event.type === "response.output_item.done" && event.item.type === "function_call").item;
+  const changed = baseRequest({
+    prompt_cache_key: "permission-session",
+    tools,
+    tool_choice: "none",
+    reasoning: { effort: "high" },
+    input: [
+      {
+        type: "function_call",
+        call_id: call.call_id,
+        name: call.name,
+        arguments: call.arguments,
+      },
+      { type: "function_call_output", call_id: call.call_id, output: "result" },
+    ],
+  });
+  await assert.rejects(
+    bridge.handle(changed, new FakeResponse()),
+    (error) => error.code === "provider_continuation_configuration_mismatch",
+  );
+  assert.equal(client.sessions[0].aborted, true);
+  assert.equal(client.sessions[0].disconnected, true);
+
+  const retried = new FakeResponse();
+  await bridge.handle(changed, retried);
+  assert.equal(client.sessions.length, 2);
+  assert.deepEqual(client.sessions[1].config.tools, []);
+  assert.deepEqual(client.sessions[1].config.availableTools, []);
+  assert.match(retried.data, /reconfigured safely/);
+});
+
+test("rejects continuation after any declared tool is removed", async () => {
+  const client = new FakeClient();
+  const bridge = newBridge(client);
+  const originalTools = [
+    { type: "function", name: "lookup", description: "Lookup", parameters: { type: "object" } },
+    { type: "function", name: "admin", description: "Admin", parameters: { type: "object" } },
+  ];
+  const first = new FakeResponse();
+  await bridge.handle(baseRequest({
+    prompt_cache_key: "tool-removal-session",
+    tools: originalTools,
+  }), first);
+  const call = sseEvents(first).find((event) =>
+    event.type === "response.output_item.done" && event.item.type === "function_call").item;
+  await assert.rejects(
+    bridge.handle(baseRequest({
+      prompt_cache_key: "tool-removal-session",
+      tools: [originalTools[0]],
+      input: [
+        {
+          type: "function_call",
+          call_id: call.call_id,
+          name: call.name,
+          arguments: call.arguments,
+        },
+        { type: "function_call_output", call_id: call.call_id, output: "result" },
+      ],
+    }), new FakeResponse()),
+    (error) => error.code === "provider_continuation_configuration_mismatch",
+  );
+  assert.equal(client.sessions[0].aborted, true);
   await bridge.stop();
 });
 
