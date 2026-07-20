@@ -48,7 +48,9 @@ npm start
 Detached launch:
 
 ```sh
-COPILOT_BRIDGE_STATE_DIR=/absolute/private/state npm run start:detached
+COPILOT_BRIDGE_STATE_DIR=/absolute/private/state \
+COPILOT_GITHUB_TOKEN=<intended-work-identity-token> \
+npm run start:detached
 ```
 
 The bridge chooses an unused loopback port by default, avoiding OpenCode's own
@@ -106,8 +108,8 @@ See:
 - **401:** reread the capability file after bridge restart.
 - **403 Host/Origin:** use literal `127.0.0.1`, the exact port, and a backend
   no-Origin request unless an Origin was explicitly allowlisted.
-- **Model unavailable:** verify `gh auth status`, Copilot entitlement, and
-  organization Copilot CLI/SDK policy.
+- **Model unavailable:** verify the explicit `COPILOT_GITHUB_TOKEN` identity,
+  Copilot entitlement, and organization Copilot CLI/SDK policy.
 - **Tool continuation expired:** retry the provider turn; continuations are
   intentionally in-memory and expire after five minutes.
 - **Paste not expanded:** ensure the file is under the configured paste root,
